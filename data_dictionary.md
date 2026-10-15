@@ -1,0 +1,93 @@
+# External inputs and calculation conventions
+
+The fixed sample is 2018-01-02 through 2026-04-29: 2018 market sessions and 6000 historical instrument slots. Every array uses the same chronological date axis and original instrument axis, including inactive instruments. Missing numerical observations are NaN. Input data are supplied separately and are not included in this repository.
+
+## Required files
+
+`--data-dir` contains the following prepared files. Except where noted, matrices have shape `(2018, 6000)`.
+
+| File | Type / meaning |
+| --- | --- |
+| `days.npy` | int32 `(2018,)`, ascending trading dates as YYYYMMDD |
+| `codes.json` | JSON list of 6000 historical Wind-style codes or empty unused slots |
+| `end_dates.npy` | int32 `(6000,)`, formal listing end dates; distant future for open listings |
+| `open.npy`, `close.npy`, `preclose.npy` | float64, unadjusted CNY opening, closing and ex-reference previous closing prices |
+| `adjusted_open.npy`, `adjusted_close.npy` | float64, causal synthetic price units described below |
+| `upper.npy`, `lower.npy` | float64, historical daily opening price limits |
+| `volume.npy`, `status.npy` | float64, traded volume and vendor trading status |
+| `universe.npy` | uint8, historical universe membership |
+| `industry.npy` | float64, historical first-level Shenwan industry code; NaN treated as a separate group |
+| `mcap.npy` | float64, total market capitalization in ten-thousand CNY |
+| `base_eligible.npy` | bool, historical base eligibility before complete-input filtering |
+| `forward_returns.npy` | float32, adjusted opening return from signal t+1 to t+21; unavailable labels are NaN |
+| `index_zz500.npy` | float64 `(2018,)`, CSI500 daily price-index returns, auxiliary reference |
+
+`--features` supplies a separate float32 `(2018, 6000, 16)` prepared factor panel. Its exact column order is:
+
+```text
+F1 F2 F3 F4 F5 T1 T2 T3 T4 T5 F6 F7 F8 F9 F10 T6
+```
+
+The loader reads these prepared inputs directly. It does not need old predictions, trained weights, research-result tables or experiment metadata. Rebuilding these inputs from raw supplier financial snapshots is outside this minimal repository.
+
+## Sources and factors
+
+Original market inputs are vendor `KLine/k.*`, historical `Universe/uv.*`, `Industry/ind.sw.level1`, turnover `dv.s_dq_turn`, and `IndexKLine/idx.k.zz500.ret`. Financial sources are daily announcement-guarded eight-report snapshots from `ASHAREFINANCIALINDICATOR`, `ASHAREBALANCESHEET` and `ASHAREINCOME`. Both announcement dates and financial announcement dates must be finite and no later than the signal day; report periods must also be no later than that day. These guards cannot certify absence of later vendor revisions to historical snapshots.
+
+| ID | Prepared definition |
+| --- | --- |
+| F1 | Four-report weighted ROE, weights 4/3/2/1 from latest to oldest, divided by its trailing 60-day mean minus one; requires at least two report values |
+| F2 | 120-day change in the latest four-report ROA slope, divided by its 120-day population standard deviation |
+| F3 | Same transformation as F2 applied to revenue YoY growth |
+| F4 | Same transformation applied to operating-profit/parent-equity slope; retained column, unused by the fixed models and pool |
+| F5 | 120-day change in the latest debt/equity ratio, divided by its 120-day population standard deviation |
+| T1, T2 | Adjusted close divided by its 20- or 60-session lag, minus one |
+| T3 | Trailing 20-session population standard deviation of raw close/preclose minus one |
+| T4 | Adjusted close divided by its trailing 20-session mean minus one; retained column, unused |
+| T5 | Trailing 20-session mean of daily turnover; invalid or negative turnover is missing |
+| F6 | Latest visible parent equity divided by total market cap ×10000, retaining negative equity |
+| F7 | Visible parent-profit TTM divided by total market cap ×10000, retaining losses |
+| F8 | Latest visible yearly ROA (`s_fa_roa_yearly`), percentage points |
+| F9 | Latest visible operating cash/revenue (`s_fa_ocftoor`) |
+| F10 | Negative latest visible debt/assets (`s_fa_debttoassets`), percentage points |
+| T6 | Adjusted close[t−20] / adjusted close[t−126] − 1, requiring positive finite endpoints |
+
+For F1–F5, each eight-report row is clipped to its own mean ±3 standard deviations before transformation. Four-report slope requires four finite reports. Rolling statistics emit NaN before a full calendar window, use finite observations within it and population variance. Denominators with absolute value ≤1e−12 are missing. F1 is converted to float32 and magnitudes ≤1e−10 set to zero before use.
+
+For F6–F10, the largest visible report period with a finite value is used; the first vendor slot resolves duplicates. Nonannual TTM profit equals current YTD + prior full year − prior same quarter, with all three reports separately visible. An annual latest report uses its full-year value. Missing reports are never replaced with later information.
+
+Base eligibility includes historical universe membership, non-ST status, at least six months listed, ordinary Shanghai/Shenzhen A-share codes, positive volume and finite positive close, and status in 0/20/21/30/31. The common pool additionally requires finite values for all 14 candidates: F1/F2/F3/F5/T1/T2/T3/T5/F6/F7/F8/F9/F10/T6. It is identical for every method, raw baseline and equal-weight benchmark. Future label availability never affects this pool.
+
+## Training and signals
+
+Centered ranks use `(average_rank − 0.5) / finite_count − 0.5`, with average ties and float32 outputs. Annual feature lists and directions are fixed in `config.json`; no new selection or parameter search occurs during reproduction. Fundamental scores average signed financial ranks; combined scores weight the financial and technical families equally. Ridge and LightGBM use ranked inputs and raw 20-session return labels demeaned within the eligible labeled cross section.
+
+Training samples follow the absolute every-fifth-market-session grid. A training signal is allowed only if its t+21 exit is strictly earlier than the prediction start. The full prior sample is used. Initial 2018–2020 replay uses the pre-2021 fit; annual 2021–2026 models use only mature earlier labels. Ridge BLAS arithmetic uses one thread; LightGBM uses six threads. Fixed versions and float32 arithmetic matter for rankings.
+
+Adopted scores first residualize prediction ranks against industry intercepts and within-industry log market cap, then rerank. EMA uses alpha=2/(span+1), with a float64 state and float32 daily emitted scores, followed by daily reranking. First finite values initialize state; missing inputs emit NaN while preserving prior state. State continues across year boundaries. The benchmark receives no predictive EMA. Returns and NAV are never smoothed.
+
+## Prices, portfolios and costs
+
+Adjusted prices follow a causal close/preclose chain. Adjusted open is adjusted close × raw open / raw close. This approximates reinvested corporate actions; it does not track exact cash-dividend receipts, taxes or rights subscription. Missing prices remain missing in features and labels.
+
+Target refresh occurs every 20 market sessions on one continuous calendar; next-open trading uses the preceding close's score. Each strategy selects equal-weight Top100, while the primary benchmark equal-weights the same eligible pool. Opening limits, suspensions, T+1, cash constraints and pending claims apply to gross and net books separately. Minimum commissions, integer lots, liquidity impact and small transfer fees are omitted.
+
+Commission is 0.0003 and slippage 0.0005 each side. Sell stamp tax is 0.001 before 2023-08-28 and 0.0005 afterward. Daily and daily doubled-slippage scopes are controls; the latter is not a 20-session cost stress.
+
+## External corporate-action table
+
+`--actions` supplies a CSV with these columns:
+
+```text
+old_code,new_code,announcement_date,effective_date,listing_date,ratio,cash_price,payment_date,source_url,settlement_source_url,modelling_assumption
+```
+
+Dates are YYYYMMDD. Empty optional dates become None; empty numeric values become NaN. Finite `cash_price` identifies a cash exit; otherwise the row is a share exchange. Exchange rows require a successor code, positive final ratio and verified listing date. Cash rows require positive cash price and payment date. Every row requires an announcement date no later than effectiveness and a source URL. The reported sample uses 12 sourced events; exact reproduction requires that same external event input.
+
+Old synthetic units convert through their last valid adjusted/raw scale. Exchange claims remain unsaleable at their prior mark until successor listing, then convert using its opening scale. Cash claims revalue on payment-day close and release spendable cash next open. Certain cash payment dates use the fifth session after a sourced settlement announcement; these timing conventions belong in `modelling_assumption`. Unresolved positions after formal listing end assume zero recovery; this is a model assumption, not proof of zero economic recovery. Suspended positions otherwise carry their last valid mark, with diagnostics in the ledger.
+
+## Outputs
+
+All outputs are external. `models/` contains newly computed scores and eligibility; `results/` contains the three-scope selected-method ledger and metrics; `raw_baseline/` contains the same-pool raw-signal 20-session comparison; `figures/` contains the four complete-history curves and their values. No previous result file is an input.
+
+`gross_return` and `net_return` are daily portfolio returns. NAV is continuous and starts at one. `turnover` is half of total traded notional divided by opening wealth. Absolute curves use NAV minus one; excess curves sum daily strategy-minus-matching-benchmark returns in percentage points. Metrics use 252 sessions/year and a zero risk-free rate for Sharpe. Company-event counts may repeat one security across methods and books.
