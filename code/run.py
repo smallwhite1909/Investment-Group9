@@ -7,13 +7,10 @@ from pathlib import Path
 from backtest import run_backtests
 from data import load_data
 from models import train_models
-from report import build_report
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", choices=["all", "report"], default="all",
-                        help="Run the fixed strategy, or regenerate V2 from existing scores and ledgers")
     parser.add_argument("--data-dir", type=Path, required=True,
                         help="Directory containing the prepared market arrays")
     parser.add_argument("--features", type=Path, required=True,
@@ -33,10 +30,8 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     data = load_data(args.data_dir, args.features, args.actions, config)
     print(f"Loaded {len(data['days'])} sessions and {len(data['codes'])} instrument slots", flush=True)
-    if args.stage == "all":
-        result = train_models(data, config, output / "models")
-        run_backtests(data, result, output, config)
-    build_report(data, config, output, Path(__file__).resolve().parents[1])
+    result = train_models(data, config, output / "models")
+    run_backtests(data, result, output, config)
     print(f"Finished: {output}", flush=True)
 
 

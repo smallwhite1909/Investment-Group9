@@ -244,7 +244,7 @@ def _trade(book, marks, adjusted_open, weights, refresh, buyable, sellable,
 
 
 def simulate_portfolio(data, scores, eligible, first_signal_index, config,
-                       method="strategy", scope="daily", position_snapshot=None):
+                       method="strategy", scope="daily"):
     """Return one gross/net portfolio pair without writing files.
 
     ``universe`` is used only for diagnostics at execution/valuation, never to
@@ -258,8 +258,6 @@ def simulate_portfolio(data, scores, eligible, first_signal_index, config,
     marked at payment-day close and available at the next market open. Explicit
     ``universe_exit_policy='writeoff_enddate'`` allows zero recovery only for
     listing ends without a known exchange/cash event, separately from trades.
-    An optional read-only callback observes actual closing positions on target
-    refresh dates and the final date, without changing trades or valuation.
     """
     days = np.asarray(data["days"], dtype=np.int64)
     eligible = np.asarray(eligible, dtype=bool)
@@ -420,8 +418,6 @@ def simulate_portfolio(data, scores, eligible, first_signal_index, config,
         net_nav = net.cash + np.dot(net.units, close_marks) + net.pending_value
         if not np.isfinite(gross_nav + net_nav) or min(gross_nav, net_nav) <= 0:
             raise ValueError(f"Nonpositive or nonfinite closing wealth on {day}")
-        if position_snapshot is not None and d >= first_trade and (refresh or d == n_days - 1):
-            position_snapshot(d, net.units, close_marks, net_nav, net.cash, net.pending_value)
         holdings_outside = held & ~np.asarray(data["universe"][d], dtype=bool)
         records.append({
             "date": int(day), "method": method, "scope": scope,
@@ -503,6 +499,10 @@ def _performance(frame, benchmark, stage, fee):
 
 
 METHODS = ["fundamental", "combined", "ridge", "lightgbm", "benchmark"]
+LABELS = {"fundamental": "Fundamentals", "combined": "Combined score", "ridge": "Ridge",
+          "lightgbm": "LightGBM", "benchmark": "Equal-weight benchmark"}
+COLORS = {"fundamental": "#9063B4", "combined": "#DC8D29", "ridge": "#248B83",
+          "lightgbm": "#2463A4", "benchmark": "#3D4754"}
 
 
 def _run_group(data, scores, eligible, first_signal, scopes, output, config):
@@ -546,6 +546,76 @@ def _run_group(data, scores, eligible, first_signal, scopes, output, config):
     return daily
 
 
+def _plot_panel(ax, dates, values, fee, excess):
+    from matplotlib import dates as mdates
+    from matplotlib.ticker import PercentFormatter
+
+    for method in METHODS:
+        if excess and method == "benchmark":
+            continue
+        ax.plot(dates, values[method], color=COLORS[method], label=LABELS[method],
+                linewidth=1.8 if method == "ridge" else 1.25,
+                linestyle="--" if method == "benchmark" else "-")
+    ax.axhline(0, color="#8994A3", linewidth=0.7, linestyle="--" if excess else "-")
+    ax.set_xlim(dates[0], dates[-1])
+    ax.set_xticks([dates[0], *pd.date_range("2019-01-01", "2026-01-01", freq="YS")])
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    ax.set_title(f"{fee.title()} {'excess' if excess else 'absolute'} return", loc="left", fontsize=15, pad=10)
+    ax.set_ylabel("Daily excess sum (pp)" if excess else "Cumulative return")
+    if not excess:
+        ax.yaxis.set_major_formatter(PercentFormatter(1))
+    ax.grid(axis="y", color="#C8D0DA", linewidth=0.55, alpha=0.7)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.margins(y=0.15)
+
+
+def _write_charts(daily, output):
+    """Write complete-history figures directly from the main 20-session book."""
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    main = daily[daily.scope.eq("rebalance20")]
+    returns = {fee: main.pivot(index="date", columns="method", values=f"{fee}_return").sort_index()
+               for fee in ["gross", "net"]}
+    dates = pd.to_datetime(returns["gross"].index.astype(str))
+    curves = {(fee, excess): frame.subtract(frame.benchmark, axis=0).cumsum()*100 if excess else (1+frame).cumprod()-1
+              for fee, frame in returns.items() for excess in [False, True]}
+    panels = [("gross", False), ("net", False), ("gross", True), ("net", True)]
+    subtitle = f"Historical backtest: {dates[0]:%d %B %Y} to {dates[-1]:%d %B %Y}"
+    for fee, excess in panels:
+        fig = Figure(figsize=(11.5, 6.5), facecolor="white")
+        FigureCanvasAgg(fig)
+        ax = fig.subplots()
+        _plot_panel(ax, dates, curves[fee, excess], fee, excess)
+        ax.legend(loc="upper left", bbox_to_anchor=(0, -0.16), ncol=3, frameon=False, fontsize=10)
+        fig.suptitle(subtitle + " | 20-session targets", fontsize=11, color="#556375", y=0.985)
+        fig.subplots_adjust(left=0.105, right=0.98, top=0.87, bottom=0.24)
+        stem = f"{fee.title()}_{'Excess' if excess else 'Absolute'}"
+        fig.savefig(output / f"{stem}.png", dpi=180)
+    fig = Figure(figsize=(10, 8.6), facecolor="white")
+    FigureCanvasAgg(fig)
+    axes = fig.subplots(2, 2)
+    for ax, (fee, excess) in zip(axes.flat, panels):
+        _plot_panel(ax, dates, curves[fee, excess], fee, excess)
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncol=3, frameon=False, fontsize=10, bbox_to_anchor=(0.5, 0.04))
+    fig.suptitle("20-session target refresh, 2018–2026", fontsize=20, color="#173450", y=0.985)
+    fig.text(0.5, 0.937, subtitle, ha="center", fontsize=10, color="#556375")
+    fig.text(0.5, 0.008, "Absolute returns compound. Excess sums same-cost daily return differences (pp).", ha="center", fontsize=9, color="#556375")
+    fig.subplots_adjust(left=0.10, right=0.98, top=0.84, bottom=0.16, wspace=0.30, hspace=0.42)
+    fig.savefig(output / "FullHistory_FourCharts.png", dpi=180)
+    rows = []
+    for method in METHODS:
+        rows.append(pd.DataFrame({"date": dates, "method": method,
+                    "gross_absolute": curves["gross", False][method].to_numpy(),
+                    "net_absolute": curves["net", False][method].to_numpy(),
+                    "gross_excess_pp": curves["gross", True][method].to_numpy(),
+                    "net_excess_pp": curves["net", True][method].to_numpy()}))
+    pd.concat(rows, ignore_index=True).to_csv(output / "FourCharts_DailyValues.csv", index=False, float_format="%.12g")
+
+
 def run_backtests(data, result, output_dir, config):
     """Reproduce the fixed 20-session strategy, raw baseline and daily controls.
 
@@ -560,4 +630,5 @@ def run_backtests(data, result, output_dir, config):
                        ["daily", "rebalance20", "double_slippage"], output / "results", config)
     _run_group(data, result["raw_scores"], result["eligible"], first_signal,
                ["rebalance20"], output / "raw_baseline", config)
+    _write_charts(pd.read_csv(output / "results" / "daily_returns.csv"), output / "figures")
     return daily
