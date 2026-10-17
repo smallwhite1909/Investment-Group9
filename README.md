@@ -1,4 +1,4 @@
-# Investment Group 9
+# Investment Group 9 · V2
 
 投资学第9组：A股截面选股，比较基本面打分、综合打分、Ridge和浅层LightGBM。采用日频输入、未来20个交易日收益预测、每20个交易日调仓的等权Top100组合，数据覆盖2018-01-02至2026-04-29。
 
@@ -6,12 +6,14 @@
 
 | 文件 | 内容 |
 | --- | --- |
-| [Report_Group9.pdf](Report_Group9.pdf) | 英文报告，正文12页＋参考文献1页 |
-| [Presentation_Group9.pptx](Presentation_Group9.pptx) | 13页幻灯片，讲解18分钟，Q&A另算 |
-| [Presentation_Group9.pdf](Presentation_Group9.pdf) | 与PPTX同版本的预览 |
+| [Report_Group9.pdf](Report_Group9.pdf) | 英文报告，正文15页＋参考文献1页，含完整历史四图和诊断分析 |
+| [Presentation_Group9.pptx](Presentation_Group9.pptx) | 20页正文＋3页备用附录，16:9，文字与表格可编辑；正文备注合计18分钟，Q&A另算 |
+| [Presentation_Group9.pdf](Presentation_Group9.pdf) | 与PPTX使用同一内容、几何布局及图表生成的PDF预览 |
 | [code/](code/)、[config.json](config.json)、[data_dictionary.md](data_dictionary.md) | 固定方案的计算代码、参数和外部输入说明 |
 
-老师另要求单个`SupplementaryMaterials_Group9.zip`。本仓库按要求只保留13个代码、说明及展示文件；数据、模型权重、回测输出和压缩包不上传。报告和PPT可直接查看，计算需要另备下述外部输入。Canvas提交需由组员完成。
+老师另要求单个`SupplementaryMaterials_Group9.zip`。本仓库保留14个必要文件；V2新增一个集中生成图表、报告和PPT的模块。数据、模型权重、回测输出和压缩包不上传。报告和PPT可直接查看，计算需要另备下述外部输入。Canvas提交、组员分工和彩排需由组员完成。
+
+V2包含回撤、月度热力图、年度收益、滚动超额与波动、换手和年度费用构成、因子相关性、Rank IC、五分组及实际持仓市值分布。四张完整历史收益图各占一页PPT；相关矩阵、实际持仓和滚动分析列为备用附录。报告按A4单独排版，曲线、矩阵和散点分别采用适合的宽高；沿用原模型和收益账本。
 
 ## 策略与结果
 
@@ -40,9 +42,15 @@ python code/run.py \
   --output /data/share/XingyuLargeFiles/Investment-Group9
 ```
 
-`--data-dir`提供准备好的市场数组、历史基础股票池和收益标签；`--features`为16列因子面板；`--actions`为带来源的公司事件表。具体文件、轴顺序、字段、公式见[data_dictionary.md](data_dictionary.md)。这些是输入数据，不需要任何旧预测、旧模型、研究结果或实验日志。仅克隆仓库不会取得数据；程序不包含从供应商数据库下载或重建原始财报快照的流程。
+`--data-dir`提供准备好的市场数组、历史基础股票池和收益标签；`--features`为16列因子面板；`--actions`为带来源的公司事件表。具体文件、轴顺序、字段、公式见[data_dictionary.md](data_dictionary.md)。完整运行从这些输入重新训练，不依赖旧项目的研究工件。仅克隆仓库不会取得数据；程序不包含从供应商数据库下载或重建原始财报快照的流程。
 
-输出目录应位于仓库及home目录之外。程序在外部目录保存重训分数、连续账本、指标、原始信号基线和日频对照，以及费前/费后、绝对/超额的完整历史四图。PDF和PPT为随仓库提供的定稿文件，运行代码不自动重新排版它们。
+默认`--stage all`会重训固定模型、重建回测并生成报告和展示。已有本管线的`models/`、`results/`和`raw_baseline/`输出后，在同一命令中加`--stage report`可只重算诊断和重建文档；仍需原外部数据，用于信号诊断及实际持仓核验。
+
+输出目录应位于仓库及home目录之外。重训分数、连续账本及对照分别位于`models/`、`results/`和`raw_baseline/`；图表、数值表和生成核验记录位于`report_assets/`。三份正式文档更新到仓库根目录。PPT文字、数字和表格为原生对象，图表为单独插入的高清图片；PDF保留矢量图表，按相同元素布局生成，未经PowerPoint原生导出验证。
+
+年度费用柱将逐日费用/开盘NAV的比例在年内相加，单位为百分点；它不是复利终值损耗或年度费率。2026年度结果均截至4月29日。
+
+Rank IC和五分组是未来20日标签诊断，不是费后交易收益；2021–2025诊断只用截至2025年底已成熟的标签，2026诊断截止4月29日，最后可评估的信号为3月30日。实际持仓图来自净值账本重放后的收盘权重，已核对重放交易数值不变。日频双倍滑点仍是日频对照。
 
 ## 代码
 
@@ -52,6 +60,7 @@ python code/run.py \
 | `code/data.py` | 加载外部数组和公司事件 |
 | `code/factors.py` | 因子定义及共同股票池 |
 | `code/models.py` | 年度训练、截面处理及因果平滑 |
-| `code/backtest.py` | 成交、费用、公司事件、指标和四图 |
+| `code/backtest.py` | 成交、费用、公司事件、指标和可选只读持仓快照 |
+| `code/report.py` | 固定结果诊断、全部图表、英文报告、可编辑PPT及PDF |
 
 价格链近似再投资分红；财报历史修订无法完全排除。回测省略整手取整、最低佣金和流动性冲击，历史收益不保证未来表现。

@@ -88,6 +88,20 @@ Old synthetic units convert through their last valid adjusted/raw scale. Exchang
 
 ## Outputs
 
-All outputs are external. `models/` contains newly computed scores and eligibility; `results/` contains the three-scope selected-method ledger and metrics; `raw_baseline/` contains the same-pool raw-signal 20-session comparison; `figures/` contains the four complete-history curves and their values. No previous result file is an input.
+Growing outputs are external. `models/` contains newly computed scores and eligibility; `results/` contains the three-scope selected-method ledger and metrics; `raw_baseline/` contains the same-pool raw-signal 20-session comparison. `report_assets/charts/` contains slide-size and report-size PNG/PDF figures; `report_assets/tables/` contains derived values, including `FourCharts_DailyValues.csv`. The three current formal documents are written to the repository root.
+
+The default full run needs no previous predictions or results. `--stage report` consumes this pipeline's existing scores and ledgers, together with the original external inputs; it recomputes diagnostic tables and documents without model or parameter selection.
 
 `gross_return` and `net_return` are daily portfolio returns. NAV is continuous and starts at one. `turnover` is half of total traded notional divided by opening wealth. Absolute curves use NAV minus one; excess curves sum daily strategy-minus-matching-benchmark returns in percentage points. Metrics use 252 sessions/year and a zero risk-free rate for Sharpe. Company-event counts may repeat one security across methods and books.
+
+## V2 diagnostic conventions
+
+Rank IC is the daily Spearman correlation between final processed scores and available mature twenty-session labels. Quintiles are assigned using all current finite eligible scores before checking future-label availability; stable security-slot order breaks score ties. Group means use the labels available inside those original groups. Missing labels never cause the remaining stocks to be reranked. Group excess subtracts that date's mean observed label in the same score pool.
+
+Diagnostics for 2021–2025 require exits by 2025-12-31; 2026 diagnostics require exits by 2026-04-29. The final evaluable signal is 2026-03-30, leaving 55 mature signal days in 2026. These overlapping future-return cohorts are not independent observations or executable fee-adjusted portfolio returns. No ordinary independent-sample significance claim is made. Factor correlation averages defined same-date Spearman correlations on every fifth market session in 2021–2025; constant-factor pairs are omitted only where correlation is undefined.
+
+Monthly absolute returns compound; monthly excess adds daily matched-cost differences. Rolling statistics require 252 observations and retain missing values until the window is full. Rolling volatility uses sample standard deviation times sqrt(252). Monthly turnover sums the daily single-sided values.
+
+Monthly fee bars sum each day's cost component divided by its pre-trade opening wealth. On trading days this equals `2 * turnover * component / (buy_notional + sell_notional)`; no-trade days contribute zero. This rate sum differs from the gross/net compounded terminal-wealth gap.
+
+Actual capital allocations replay the unchanged Ridge and benchmark net books, observing closing positions on target-refresh dates and the final date. Stock values, cash and pending claims are normalized by actual net NAV. Market-cap quintile boundaries come from that date's common eligible pool, with Q1 smallest and Q5 largest; held stocks outside that pool retain their actual values. The chart's `Other` combines unknown market capitalization, cash and claims. The replay requires every original engine value to agree exactly with the stored ledger; CSV-wide integer/float dtype widening does not change the numeric comparison.
