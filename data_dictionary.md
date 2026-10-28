@@ -113,3 +113,10 @@ Monthly absolute returns compound; monthly excess adds daily matched-cost differ
 Monthly fee bars sum each day's cost component divided by its pre-trade opening wealth. On trading days this equals `2 * turnover * component / (buy_notional + sell_notional)`; no-trade days contribute zero. This rate sum differs from the gross/net compounded terminal-wealth gap.
 
 Actual capital allocations replay the unchanged Ridge and benchmark net books, observing closing positions on target-refresh dates and the final date. Stock values, cash and pending claims are normalized by actual net NAV. Market-cap quintile boundaries come from that date's common eligible pool, with Q1 smallest and Q5 largest; held stocks outside that pool retain their actual values. The chart's `Other` combines unknown market capitalization, cash and claims. The replay requires every original engine value to agree exactly with the stored ledger; CSV-wide integer/float dtype widening does not change the numeric comparison.
+
+
+## Main-comparison identity and reporting periods
+
+All primary report/PPT/README comparisons use exactly two named versions: `ridge` is the original expanding-window published model (`Ridge-exp`), and `lasso` is the selected three-year rolling model (`Lasso-3y`). Main absolute charts show uninterrupted full-history compounded NAV minus one through2026-04-29. The common comparison table reports these same two methods for `full`, `development`2021–2025, and `holdout`2026, all `rebalance20`/`net`; it is exported from the same metrics ledger as `report_assets/tables/main_comparison.csv`. Full-history net returns are417.56%/395.35%, development211.46%/195.66%, and2026 3.35%/8.80% (Lasso-3y/Ridge-exp). Full history includes2018–2020 fitted replay.
+
+`Ridge-3y control` is a distinct auxiliary fixed-alpha/float64-Gram experiment whose2021–2025 net return is223.12%. It is named separately and is not plotted under the `Ridge-exp` label or substituted into a primary-comparison column. Reporting-period changes and model-version changes must both be explicit.

@@ -18,6 +18,26 @@ from scipy.stats import rankdata as _analysis_rankdata
 
 _analysis_methods = ('fundamental', 'combined', 'ridge', 'lasso', 'lightgbm')
 _analysis_all_methods = (*_analysis_methods, 'benchmark')
+_MAIN_MODEL_VERSIONS = {'ridge': 'Ridge-exp', 'lasso': 'Lasso-3y'}
+_MAIN_PERIODS = ('full', 'development', 'holdout')
+
+
+def _main_comparison(ctx):
+    """One ledger-backed comparison shared by report, slides and CSV export."""
+    metrics = ctx['metrics']
+    rows = []
+    for period in _MAIN_PERIODS:
+        for method, model_version in _MAIN_MODEL_VERSIONS.items():
+            selected = metrics.loc[metrics.scope.eq('rebalance20')
+                                   & metrics.stage.eq(period) & metrics.method.eq(method)]
+            net = selected.loc[selected.fee.eq('net')].iloc[0]
+            gross = selected.loc[selected.fee.eq('gross')].iloc[0]
+            rows.append({'period': period, 'method': method, 'model_version': model_version,
+                         'net_return': float(net.total_return),
+                         'gross_return': float(gross.total_return),
+                         'net_excess_pp': float(net.cumulative_excess * 100),
+                         'gross_excess_pp': float(gross.cumulative_excess * 100)})
+    return _analysis_pd.DataFrame(rows)
 
 
 def _analysis_calendar(series, years):
@@ -227,7 +247,8 @@ def analyze_results(data, config, output_root):
     lasso_coefficients = pd.read_csv(output / 'models/lasso_coefficients.csv')
     lasso_validation = pd.read_csv(output / 'models/lasso_validation.csv')
     ctx = {'lasso_fits': lasso_fits, 'lasso_coefficients': lasso_coefficients,
-           'lasso_validation': lasso_validation, 'summary': summary, 'config': config, 'metrics': metrics, 'raw_metrics': raw_metrics,
+           'lasso_validation': lasso_validation,
+           'main_comparison': _main_comparison({'metrics': metrics}), 'summary': summary, 'config': config, 'metrics': metrics, 'raw_metrics': raw_metrics,
            'daily_main': daily_main, 'raw_daily': raw_daily, 'returns': returns, 'raw_returns': raw_returns,
            'drawdown': drawdown, 'annual_returns': annual_returns, 'annual_excess': annual_excess,
            'monthly_net_excess': monthly_net_excess, 'monthly_net_return': monthly_net_return,
@@ -242,7 +263,7 @@ def analyze_results(data, config, output_root):
                 'rolling_excess': rolling_excess, 'rolling_vol': rolling_vol,
                 'monthly_turnover': monthly_turnover, 'cost_components': cost_components,
                 'lasso_fit_windows': lasso_fits, 'lasso_coefficients': lasso_coefficients,
-                'lasso_validation': lasso_validation}
+                'lasso_validation': lasso_validation, 'main_comparison': ctx['main_comparison']}
     for fee in ('gross', 'net'):
         exported.update({f'annual_returns_{fee}': annual_returns[fee], f'annual_excess_{fee}': annual_excess[fee],
                          f'returns_{fee}': returns[fee], f'raw_returns_{fee}': raw_returns[fee]})
@@ -270,7 +291,7 @@ from backtest import simulate_portfolio
 
 
 _CHART_METHODS=['fundamental','combined','ridge','lasso','lightgbm','benchmark']
-_CHART_LABELS={'fundamental':'Fund.','combined':'Combined','ridge':'Ridge','lasso':'Lasso','lightgbm':'LGBM','benchmark':'EW pool'}
+_CHART_LABELS={'fundamental':'Fund.','combined':'Combined','ridge':_MAIN_MODEL_VERSIONS['ridge'],'lasso':_MAIN_MODEL_VERSIONS['lasso'],'lightgbm':'LGBM','benchmark':'EW pool'}
 _CHART_COLORS={'fundamental':'#9063B4','combined':'#D79538','ridge':'#137F82','lasso':'#C45262','lightgbm':'#3475AB','benchmark':'#8795A6'}
 _CHART_INK='#162B42'
 _CHART_MUTED='#657489'
@@ -443,7 +464,7 @@ def _make_chart(ctx, key, path, width, height, size):
     elif key == 'annual_return':
         frame = ctx['annual_returns']['net']
         x = np.arange(len(frame))
-        ax.bar(x-.19, frame.ridge*100, .34, label='Ridge', color=_CHART_COLORS['ridge'], zorder=3)
+        ax.bar(x-.19, frame.ridge*100, .34, label=_CHART_LABELS['ridge'], color=_CHART_COLORS['ridge'], zorder=3)
         ax.bar(x+.19, frame.benchmark*100, .34, label='EW pool', color='#A2AEBA', zorder=3)
         years_to_label = list(range(0,len(frame),2)) if report else list(range(len(frame)))
         ax.set_xticks(x[years_to_label], [str(frame.index[i])+('*' if frame.index[i] == 2026 else '') for i in years_to_label])
@@ -557,7 +578,7 @@ def _make_chart(ctx, key, path, width, height, size):
         frame = frame.iloc[[0,1,2,3,4,8]]
         ax.set_position([1.00/width, .43/height, (width-1.25)/width, (height-.96)/height])
         y = np.arange(6)
-        ax.barh(y-.17, frame.ridge*100, .30, color=_CHART_COLORS['ridge'], label='Ridge', zorder=3)
+        ax.barh(y-.17, frame.ridge*100, .30, color=_CHART_COLORS['ridge'], label=_CHART_LABELS['ridge'], zorder=3)
         ax.barh(y+.17, frame.benchmark*100, .30, color='#A4AFBB', label='EW pool', zorder=3)
         ax.set_yticks(y, ['Small Q1', 'Q2', 'Q3', 'Q4', 'Large Q5', 'Other'])
         ax.invert_yaxis()
@@ -586,7 +607,8 @@ def _make_chart(ctx, key, path, width, height, size):
         if legend_columns:
             handles, labels = ax.get_legend_handles_labels()
             if key in ('gross_absolute', 'net_absolute', 'gross_excess', 'net_excess', 'rank_ic', 'quintile', 'quintile_2026'):
-                order = sorted(range(len(labels)), key=lambda i: ['Fund.', 'Combined', 'Ridge', 'Lasso', 'LGBM', 'EW pool', 'EW pool (0)'].index(labels[i]))
+                legend_order = [_CHART_LABELS[m] for m in _CHART_METHODS] + ['EW pool (0)']
+                order = sorted(range(len(labels)), key=lambda i: legend_order.index(labels[i]))
                 handles, labels = [handles[i] for i in order], [labels[i] for i in order]
             fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(.53, .995),
                        ncol=legend_columns, frameon=False, fontsize=size,
@@ -665,8 +687,8 @@ _report_muted = '#657489'
 _report_grid = '#E3E9EF'
 _report_methods = ['fundamental', 'combined', 'ridge', 'lasso', 'lightgbm', 'benchmark']
 _report_names = {
-    'fundamental': 'Fundamental', 'combined': 'Combined', 'ridge': 'Ridge',
-    'lasso': 'Lasso', 'lightgbm': 'LightGBM', 'benchmark': 'Benchmark',
+    'fundamental': 'Fundamental', 'combined': 'Combined', 'ridge': _MAIN_MODEL_VERSIONS['ridge'],
+    'lasso': _MAIN_MODEL_VERSIONS['lasso'], 'lightgbm': 'LightGBM', 'benchmark': 'Benchmark',
 }
 
 
@@ -791,7 +813,14 @@ def write_report(ctx, charts, project, output_root):
     lasso_settings = _lasso_report_settings(config)
     optimization = config.get('lasso_optimization')
 
-    # Page 1: main findings and the complete five-method recent comparison.
+    comparison = _main_comparison(ctx)
+    main_rows = [['Model version', 'Full net', '2021–2025 net', '2026 net']]
+    for version in _MAIN_MODEL_VERSIONS.values():
+        values = comparison.loc[comparison.model_version.eq(version)].set_index('period')
+        main_rows.append([version, *[_report_percent(values.loc[period, 'net_return'], 2)
+                                    for period in _MAIN_PERIODS]])
+
+    # Page 1: the same published versions and three periods as the headline CSV.
     summary_rows = [['Portfolio', '2026 gross', '2026 net', 'Net excess (pp)']]
     for method in _report_methods:
         summary_rows.append([
@@ -801,45 +830,31 @@ def write_report(ctx, charts, project, output_root):
         ])
     pages = [[
         _report_paragraph('Fundamental and technical signals for A-share stock selection', 'heading'),
-        ('gap', 10),
-        _report_paragraph('Investments 1005 | Group 9', 'subheading'),
+        ('gap', 10), _report_paragraph('Investments 1005 | Group 9', 'subheading'),
         _report_paragraph(
             f'Historical daily data: {_report_date(summary["start_date"])} to {end_date}. '
-            f'The main implementation is a long-only, equal-weight Top-{config["top_n"]} '
-            f'portfolio with targets refreshed every {config["rebalance_sessions"]} market sessions.'),
-        ('gap', 10),
-        _report_paragraph('Research question', 'subheading'),
+            f'Long-only equal-weight Top-{config["top_n"]} targets refresh every '
+            f'{config["rebalance_sessions"]} market sessions, with the same pool, execution and costs.'),
+        ('gap', 8), _report_paragraph('One published comparison, three periods', 'subheading'),
         _report_paragraph(
-            'Can accounting and technical information improve stock selection after trading costs '
-            'within the same opportunity set? We compare a fundamental score, a combined score, '
-            'Ridge, Lasso and a shallow LightGBM model. A matched equal-weight portfolio '
-            'isolates stock-selection performance from differences in the available stock pool.'),
-        ('gap', 10),
-        _report_paragraph('Main findings', 'subheading'),
+            'Ridge-exp is the original expanding-history Ridge. Lasso-3y is the optimized '
+            'three-year-window Lasso. These exact versions appear in the main curves and '
+            'tables. The full history includes 2018–2020 fitted replay; 2021–2025 is '
+            'development, and 2026 is the reviewed partial-year reevaluation.'), ('gap', 8),
+        _report_table(main_rows, [102, 106, 132, width - 340]), ('gap', 8),
         _report_paragraph(
-            f'Ridge earns {_report_percent(ridge["total_return"])} net over the complete history, '
-            f'versus {_report_percent(benchmark["total_return"])} for the benchmark. Its maximum '
-            f'drawdown is {_report_percent(abs(ridge["max_drawdown"]))}, compared with '
-            f'{_report_percent(abs(benchmark["max_drawdown"]))}. Higher historical return therefore '
-            'does not imply lower downside risk.'),
-        ('gap', 8),
-        _report_paragraph(f'2026 through {end_date}', 'subheading'),
-        _report_table(summary_rows, [94, 99, 99, width - 292]),
-        ('gap', 10),
+            'Lasso-3y has the higher full-history and development net return; Ridge-exp '
+            'has the higher 2026 net return. These are different intervals of the same '
+            'published models. Ridge-3y control is a separate development diagnostic, '
+            'not the Ridge-exp main curve (Section 13).'), ('gap', 8),
+        _report_paragraph(f'All methods: 2026 through {end_date}', 'subheading'),
+        _report_table(summary_rows, [94, 99, 99, width - 292]), ('gap', 8),
         _report_paragraph(
-            f'For 2021–2025, Ridge returns {_report_percent(development["ridge"]["total_return"])} '
-            f'net, versus {_report_percent(development["benchmark"]["total_return"])} for the '
-            f'benchmark. In 2026 through {end_date}, the corresponding returns are '
-            f'{_report_percent(recent["ridge"]["total_return"], 2)} and '
-            f'{_report_percent(recent["benchmark"]["total_return"], 2)}; cumulative daily net '
-            f'excess is {_report_pp(recent["ridge"]["cumulative_excess"])} percentage points.'),
-        ('gap', 8),
-        _report_paragraph(
-            f'Lasso returns {_report_percent(development["lasso"]["total_return"], 2)} net in '
-            f'2021–2025 and {_report_percent(recent["lasso"]["total_return"], 2)} in 2026. '
-            f'{lasso_comparison} All five methods use the original Top-100 rule throughout. '
-            'Absolute returns compound; excess sums daily strategy-minus-benchmark returns. '
-            'Partial-year evidence remains limited.'),
+            'The research question is whether accounting and market signals improve '
+            'stock selection after trading costs within a common opportunity set. '
+            'Absolute returns compound daily wealth; excess sums daily matched-benchmark '
+            'return differences. Higher development or fitted-history returns do not '
+            'establish stronger future performance.'),
     ]]
 
     # Page 2: concise definitions preserve the economic meaning of every candidate.
@@ -981,8 +996,9 @@ def write_report(ctx, charts, project, output_root):
     pages.append([
         _report_paragraph('4. Complete-history absolute returns', 'heading'), ('gap', 10),
         _report_paragraph(
-            'Absolute curves show portfolio NAV minus one, using the complete daily history. '
-            'They retain cash, execution constraints and compounding along each path.'), ('gap', 8),
+            'The complete-history curves compare Ridge-exp and Lasso-3y alongside all '
+            'other methods. NAV minus one includes 2018–2020 fitted replay, cash, execution '
+            'constraints and daily compounding.'), ('gap', 8),
         *_report_chart('gross_absolute',
             f'Figure 2. Cumulative gross returns, 2 Jan 2018–{end_date}. '
             'Each strategy is compared with the gross common-pool benchmark.'),
@@ -990,12 +1006,12 @@ def write_report(ctx, charts, project, output_root):
             f'Figure 3. Cumulative net returns over the same complete history, including '
             'commission, sell stamp duty and slippage.'),
         _report_paragraph(
-            f'Ridge ends at {_report_percent(gross["ridge"]["total_return"])} gross and '
-            f'{_report_percent(ridge["total_return"])} net. The benchmark ends at '
-            f'{_report_percent(gross["benchmark"]["total_return"])} gross and '
-            f'{_report_percent(benchmark["total_return"])} net. Gross-minus-net terminal '
-            'wealth includes compounding and differing trading paths; it is not the '
-            'simple sum of fee payments.'),
+            f'Lasso-3y ends at {_report_percent(gross["lasso"]["total_return"], 2)} gross '
+            f'and {_report_percent(net["lasso"]["total_return"], 2)} net; Ridge-exp ends at '
+            f'{_report_percent(gross["ridge"]["total_return"], 2)} gross and '
+            f'{_report_percent(ridge["total_return"], 2)} net. These are the full-history '
+            'figures in the first-page comparison. Gross-minus-net terminal wealth includes '
+            'compounding and differing trading paths, not simply fee payments.'),
     ])
     pages.append([
         _report_paragraph('5. Complete-history excess returns', 'heading'), ('gap', 10),
@@ -1010,12 +1026,13 @@ def write_report(ctx, charts, project, output_root):
             'Figure 5. Cumulative daily net excess versus the same-pool net benchmark, '
             'including the matching execution costs.'),
         _report_paragraph(
-            f'Ridge accumulates {_report_pp(ridge["cumulative_excess"])} pp of daily net '
-            f'excess over the full history, including '
-            f'{_report_pp(development["ridge"]["cumulative_excess"])} pp in 2021–2025 '
-            f'and {_report_pp(recent["ridge"]["cumulative_excess"])} pp in 2026 through '
-            f'{end_date}. The advantage is uneven: falling segments show intervals '
-            'when the benchmark outperforms.'),
+            f'Full-history net excess is {_report_pp(net["lasso"]["cumulative_excess"])} pp '
+            f'for Lasso-3y and {_report_pp(ridge["cumulative_excess"])} pp for Ridge-exp. '
+            f'In 2021–2025 it is {_report_pp(development["lasso"]["cumulative_excess"])} '
+            f'and {_report_pp(development["ridge"]["cumulative_excess"])} pp; in 2026 '
+            f'through {end_date}, {_report_pp(recent["lasso"]["cumulative_excess"])} '
+            f'and {_report_pp(recent["ridge"]["cumulative_excess"])} pp, respectively. '
+            'Falling segments show benchmark outperformance; the model versions stay fixed.'),
     ])
 
     # Page 8: return is paired with observed risk, not a one-number sales claim.
@@ -1052,17 +1069,16 @@ def write_report(ctx, charts, project, output_root):
             'Figure 7. Net CAGR versus annualized daily volatility in 2021–2025, '
             'with identical 20-session target schedules and matched costs.'),
         _report_paragraph(
-            f'Ridge’s net CAGR is {_report_percent(development["ridge"]["annualized_return"])}, '
-            f'versus {_report_percent(development["benchmark"]["annualized_return"])} for '
-            f'the benchmark, at volatilities of '
-            f'{_report_percent(development["ridge"]["annualized_volatility"])} and '
-            f'{_report_percent(development["benchmark"]["annualized_volatility"])}. '
-            'This historical advantage does not provide protection against large losses: '
-            'the previous page shows comparable peak-to-trough risk.'), ('gap', 8),
+            f'Lasso-3y has net CAGR {_report_percent(development["lasso"]["annualized_return"], 2)} '
+            f'and volatility {_report_percent(development["lasso"]["annualized_volatility"], 2)}; '
+            f'Ridge-exp has {_report_percent(development["ridge"]["annualized_return"], 2)} '
+            f'and {_report_percent(development["ridge"]["annualized_volatility"], 2)}, respectively. '
+            'These are the same published versions as the full-history curves, evaluated '
+            'only on 2021–2025. Ridge-3y control is auxiliary and is not plotted here.'), ('gap', 8),
         _report_paragraph(
-            'LightGBM permits nonlinear interactions, but flexibility alone does not '
-            'establish a better return–risk trade-off. The plotted history describes '
-            'the adopted implementations rather than a universally superior model.'),
+            'The development return–risk advantage of Lasso-3y does not carry into '
+            'the 2026 net-return comparison. Fitted history, development and partial-year '
+            'reevaluation answer different questions and must retain their stated dates.'),
     ])
 
     # Page 9: a different aggregation is explicitly distinguished from compounding.
@@ -1072,7 +1088,7 @@ def write_report(ctx, charts, project, output_root):
             'Monthly excess sums daily return differences; annual returns compound '
             'wealth. Both expose variation hidden by the final cumulative return.'), ('gap', 8),
         *_report_chart('calendar_excess',
-            'Figure 8. Ridge monthly net excess in percentage points: the sum of daily '
+            'Figure 8. Ridge-exp monthly net excess in percentage points: the sum of daily '
             'strategy-minus-benchmark returns. Gray dashes denote unobserved months.'),
         *_report_chart('annual_return',
             f'Figure 9. Compounded calendar-year net returns. The 2026 observations '
@@ -1089,10 +1105,10 @@ def write_report(ctx, charts, project, output_root):
     pages.append([
         _report_paragraph('9. Turnover and the sources of trading costs', 'heading'), ('gap', 10),
         *_report_chart('turnover',
-            'Figure 10. Monthly summed daily turnover for Ridge and the benchmark. '
+            'Figure 10. Monthly summed daily turnover for Ridge-exp and the benchmark. '
             'Daily turnover is half the traded notional divided by opening wealth.'),
         *_report_chart('costs',
-            'Figure 11. Calendar-year Ridge commission, stamp duty and slippage, '
+            'Figure 11. Calendar-year Ridge-exp commission, stamp duty and slippage, '
             'scaled by each transaction day’s pre-trade opening NAV and summed (pp). '
             '2026 ends on 29 Apr; the 2023 tax change applies for part of that year.'),
         _report_paragraph(
@@ -1179,16 +1195,7 @@ def write_report(ctx, charts, project, output_root):
         ic = ctx['ic_annual'].loc[ctx['ic_annual'].year.eq(year) & ctx['ic_annual'].method.eq('lasso'), 'mean_ic'].iloc[0]
         lasso_rows.append([str(year), f'{fit["alpha"]:.3g}', str(int(fit['nonzero_count'])),
                            f'{ic:+.4f}' if np.isfinite(ic) else '— (no scores)'])
-    comparison_rows = [['Interval', 'Lasso net', 'Ridge net', 'Lasso excess (pp)']]
-    for label, stage in [('2021–2025', 'development'), ('2026 partial', 'holdout')]:
-        result = _report_metric(ctx, 'lasso', stage)
-        comparison_rows.append([label, _report_percent(result.total_return, 2),
-                                _report_percent(_report_metric(ctx, 'ridge', stage).total_return, 2),
-                                _report_pp(result.cumulative_excess)])
-    if optimization:
-        comparison_rows.append(['Dev., paired inputs', _report_percent(development['lasso'].total_return, 2),
-                                _report_percent(optimization['paired_ridge_development_net'], 2),
-                                _report_pp(development['lasso'].cumulative_excess)])
+    comparison_rows = main_rows
     nonzero_min, nonzero_max = int(lasso_fits.nonzero_count.min()), int(lasso_fits.nonzero_count.max())
     boundary_count = int(lasso_fits.grid_boundary.sum())
     latest_coefficients = ctx['lasso_coefficients'].loc[ctx['lasso_coefficients'].year.eq(2026)]
@@ -1197,12 +1204,13 @@ def write_report(ctx, charts, project, output_root):
     if optimization:
         optimization_text = (
             f'Outer search compared {optimization["development_candidates"]} configurations '
-            f'({optimization["lasso_candidates"]} Lasso; {optimization["ridge_controls"]} paired Ridge). '
+            f'({optimization["lasso_candidates"]} Lasso; {optimization["ridge_controls"]} Ridge controls). '
             f'Development data end {_report_date(str(optimization["selection_cutoff"]))}; '
             'the selected specification was frozen before 2026 reevaluation. '
             f'Original Lasso development net was {_report_percent(optimization["baseline_development_net"], 2)}. '
-            'Paired Ridge matches inputs, window, target and EMA, with fixed alpha=10,000 '
-            'and a float64 Gram solver; its penalty was not separately tuned. ')
+            f'Ridge-3y control (development only) returns {_report_percent(optimization["paired_ridge_development_net"], 2)} net. '
+            'It matches Lasso inputs, window, target and EMA, using fixed alpha=10,000 '
+            'and float64 Gram; it is not the main Ridge-exp curve. ')
         if optimization.get('baseline_holdout_net') is not None:
             optimization_text += (
                 f'Prior Lasso 2026 net was {_report_percent(optimization["baseline_holdout_net"], 2)}, '
@@ -1213,7 +1221,7 @@ def write_report(ctx, charts, project, output_root):
             f'L1 regression uses {lasso_settings["features"]} inputs, {lasso_settings["window"]}, '
             f'a {lasso_settings["target"]} and score EMA{lasso_settings["span"]}. '
             'Top-100 timing, stock pool, execution and costs remain common. [5]'), ('gap', 8),
-        _report_table(comparison_rows, [100, 96, 96, width - 292]), ('gap', 8),
+        _report_table(comparison_rows, [102, 106, 132, width - 340]), ('gap', 8),
         _report_paragraph('Historical selection and coefficient sparsity', 'subheading'),
         _report_paragraph(
             'Inner alpha validation uses the preceding calendar year: training-label exits '
@@ -1240,7 +1248,7 @@ def write_report(ctx, charts, project, output_root):
         _report_paragraph('What the results support', 'subheading'),
         _report_paragraph(
             'Ridge and Lasso compare recorded specifications under matched execution. '
-            + ('The paired Ridge control additionally matches selected inputs, window, target '
+            + ('The auxiliary Ridge-3y control matches selected inputs, window, target '
                'and processing. ' if optimization else '')
             + 'Neither penalty guarantees stronger future returns or protection from drawdowns.'), ('gap', 8),
         _report_paragraph('What remains uncertain', 'subheading'),
@@ -1397,7 +1405,7 @@ _ppt_grid = "#D9DEE3"
 _ppt_width = 13.333333
 _ppt_height = 7.5
 _ppt_methods = ("fundamental", "combined", "ridge", "lasso", "lightgbm", "benchmark")
-_ppt_labels = {"fundamental": "Fundamental", "combined": "Combined", "ridge": "Ridge", "lasso": "Lasso", "lightgbm": "LightGBM", "benchmark": "Benchmark"}
+_ppt_labels = {"fundamental": "Fundamental", "combined": "Combined", "ridge": _MAIN_MODEL_VERSIONS["ridge"], "lasso": _MAIN_MODEL_VERSIONS["lasso"], "lightgbm": "LightGBM", "benchmark": "Benchmark"}
 _ppt_seconds = [20,70,50,55,75,65,50,60,40,65,75,55,45,40,50,60,55,55,65,30,0,0,0]
 
 def _ppt_register_fonts():
@@ -1644,22 +1652,31 @@ def write_presentation(ctx, charts, project, output_root):
     ])
     notes.append("Introduce the question: can financial and market signals improve cross-sectional stock selection after stated trading costs? Identify five methods, the common opportunity set and the observed historical dates.")
 
-    # 2. All methods remain visible, including weak 2026 results.
-    rows = [["Method", "2021–2025 net", f"{latest} net", f"{latest} excess (pp)"]]
-    for method in _ppt_methods:
-        rows.append([_ppt_labels[method], _ppt_percent(_ppt_metric(ctx, method, "development")),
-                     _ppt_percent(_ppt_metric(ctx, method, "holdout")),
-                     f"{_ppt_metric(ctx, method, 'holdout', 'cumulative_excess') * 100:+.2f}"])
-    items = _ppt_header("Net performance at a glance", f"All five methods and the matched pool; {latest} ends on {end}")
-    for x, label, value in [(1.00, "RIDGE · 2021–2025 NET", _ppt_percent(ridge_dev)),
-                            (5.00, f"RIDGE · {latest} NET", _ppt_percent(ridge_latest)),
-                            (9.00, f"RIDGE · {latest} EXCESS", _ppt_pp(latest_excess))]:
-        items += [_ppt_text(label, x, 1.94, 3.35, .3, 14, True, _ppt_muted),
-                  _ppt_text(value, x, 2.38, 3.35, .55, 32, True, _ppt_teal)]
-    items += [_ppt_table(rows, .85, 3.20, [3.00, 3.20, 2.60, 2.80], .45, 18, [1, 2, 3], [3]),
-              _ppt_text(lasso_comparison, .98, 6.55, 11.35, .45, 20)]
+    # The same six ledger records drive the headline table in both documents.
+    comparison = _main_comparison(ctx)
+    main_rows = [["Model version", "Full net", "2021–2025 net", f"{latest} net"]]
+    for version in _MAIN_MODEL_VERSIONS.values():
+        values = comparison.loc[comparison.model_version.eq(version)].set_index('period')
+        main_rows.append([version, *[_ppt_percent(values.loc[period, 'net_return'])
+                                    for period in _MAIN_PERIODS]])
+    items = _ppt_header("One comparison, three periods",
+                        "The same published model versions in the tables, curves and conclusions")
+    items += [_ppt_table(main_rows, .85, 2.06, [3.00, 2.80, 2.90, 2.90], .66, 23, [1, 2, 3]),
+              _ppt_text("Ridge-exp: original expanding history · Lasso-3y: optimized three-year window", .98, 4.55, 11.35, .50, 19),
+              _ppt_text("Full history includes 2018–2020 fitted replay; 2026 ends on 29 April.", .98, 5.27, 11.35, .45, 19),
+              _ppt_text("Ridge-3y control is a separate development diagnostic, absent from the main curves.", .98, 5.96, 11.35, .45, 18, color=_ppt_muted),
+              _ppt_text("Lasso-3y leads full/development; Ridge-exp leads 2026.", .98, 6.64, 11.35, .40, 20, True)]
     pages.append(items)
-    notes.append(f"Read every method, including Lasso: its 2021–2025 net return is {_ppt_percent(_ppt_metric(ctx, 'lasso', 'development'))}, and its 2026 net return is {_ppt_percent(_ppt_metric(ctx, 'lasso', 'holdout'))}. Ridge remains the original reference implementation. Compare net returns and summed daily excess separately. Absolute returns compound; excess sums daily differences.")
+    notes.append(
+        "Read the same two published models across all three periods: full Lasso-3y "
+        f"{_ppt_percent(_ppt_metric(ctx, 'lasso', 'full'))}, Ridge-exp "
+        f"{_ppt_percent(_ppt_metric(ctx, 'ridge', 'full'))}; development "
+        f"{_ppt_percent(_ppt_metric(ctx, 'lasso', 'development'))} versus "
+        f"{_ppt_percent(_ppt_metric(ctx, 'ridge', 'development'))}; 2026 "
+        f"{_ppt_percent(_ppt_metric(ctx, 'lasso', 'holdout'))} versus "
+        f"{_ppt_percent(_ppt_metric(ctx, 'ridge', 'holdout'))}. "
+        "Full history includes fitted replay. These are not different model versions. "
+        "The auxiliary Ridge-3y control is a development diagnostic and is not the main Ridge-exp curve.")
 
     # 3. Two text columns instead of three decorative cards.
     pages.append([
@@ -1689,8 +1706,8 @@ def write_presentation(ctx, charts, project, output_root):
     model_rows = [["Method", "Score or model", "EMA sessions"],
                   ["Fundamental", "Signed financial ranks", "20"],
                   ["Combined", "Equal financial / technical families", "40"],
-                  ["Ridge", "alpha = 10,000", "20"],
-                  ["Lasso", f"L1; {lasso_settings['features']} inputs; annual validation alpha", str(lasso_settings['span'])],
+                  ["Ridge-exp", "Expanding history; alpha = 10,000", "20"],
+                  ["Lasso-3y", f"{lasso_settings['features']} inputs; 3-year history; validation alpha", str(lasso_settings['span'])],
                   ["LightGBM", "depth 3; 7 leaves; 56 trees", "40"]]
     pages.append([*_ppt_header("Fixed models, annual refits", "Predict 20-session returns; only labels with earlier t+21 exits enter training"),
                   *pipeline, _ppt_table(model_rows, .85, 3.12, [2.7, 6.0, 2.9], .50, 18, [2], [3]),
@@ -1711,11 +1728,11 @@ def write_presentation(ctx, charts, project, output_root):
     notes.append("Differentiate daily signals and valuation from twenty-session targets. Gross and net books hold separate cash and securities. Explain T+1, opening limits, suspended orders and retries. The benchmark uses the same pool, frequency, rules and matching fees. Explain exchange and cash claims, cash released only after payment, documented settlement-date assumptions, and the zero-recovery end-date policy for unresolved positions. Synthetic adjusted units approximate dividend reinvestment.")
 
     pages.append(_ppt_plot_page(charts, "gross_absolute", "Gross absolute return", span,
-        "All five methods and the equal-weight pool are shown over the full history."))
+        f"Full gross: Lasso-3y {_ppt_percent(_ppt_metric(ctx, 'lasso', 'full', fee='gross'))}; Ridge-exp {_ppt_percent(_ppt_metric(ctx, 'ridge', 'full', fee='gross'))}."))
     notes.append("Read the complete gross return history. Include all five methods and the pool rather than only the winner. Wealth compounds daily portfolio returns. The initial flat section precedes feasible trading, and the early history is fitted replay. There is no yearly restart or clipped weak interval.")
 
     pages.append(_ppt_plot_page(charts, "net_absolute", "Net absolute return", span,
-        f"2021–2025: Ridge {_ppt_percent(ridge_dev)}; matched pool {_ppt_percent(pool_dev)}."))
+        f"Full net: Lasso-3y {_ppt_percent(_ppt_metric(ctx, 'lasso', 'full'))}; Ridge-exp {_ppt_percent(_ppt_metric(ctx, 'ridge', 'full'))}."))
     notes.append("Compare this net chart with the preceding gross chart. Costs are charged inside the cash ledger and influence later holdings, so the compounded gross-minus-net wealth difference is not a pure fee sum. Keep every method visible and use the table for the weaker latest-year results.")
 
     pages.append(_ppt_plot_page(charts, "gross_excess", "Gross excess return", f"{span} · Daily differences versus the gross pool (pp)",
@@ -1723,24 +1740,24 @@ def write_presentation(ctx, charts, project, output_root):
     notes.append("Excess is an arithmetic sum of daily strategy-minus-matched-pool returns, expressed in percentage points. The pool has zero excess against itself and is explicitly identified. This is not compounded relative wealth or the difference between compounded terminal returns.")
 
     pages.append(_ppt_plot_page(charts, "net_excess", "Net excess return", f"{span} · Daily differences versus the net pool (pp)",
-        f"Ridge's {latest} daily net excess is {_ppt_pp(latest_excess)} through {end}."))
+        f"Full net excess: Lasso-3y {_ppt_pp(_ppt_metric(ctx, 'lasso', 'full', 'cumulative_excess'))}; Ridge-exp {_ppt_pp(_ppt_metric(ctx, 'ridge', 'full', 'cumulative_excess'))}."))
     notes.append("Read both strong and weak portions of net excess. The matched pool pays the same cost schedule and obeys the same execution rules. In 2026, Fundamental and LightGBM lag while Combined and Ridge have positive summed excess. The latest period is incomplete; do not present the full-history positive endpoint as evidence that every interval wins.")
 
     pages.append([
-        *_ppt_header("Return comes with drawdown risk", "Full-history drawdown and 2021–2025 net return / volatility"),
+        *_ppt_header("Return comes with drawdown risk", "Same published versions · Full-history drawdown; 2021–2025 return / volatility"),
         _ppt_text("DRAWDOWN", .98, 1.78, 5.25, .3, 17, True),
         _ppt_text("RETURN / RISK", 7.12, 1.78, 5.25, .3, 17, True),
         _ppt_chart(charts, "drawdown", (.85, 2.08, 5.5, 4.15)),
         _ppt_chart(charts, "risk_return", (6.98, 2.08, 5.5, 4.15)),
-        _ppt_text(f"Ridge max. drawdown: {_ppt_percent(dd, 1)}; pool: {_ppt_percent(pool_dd, 1)}.", .98, 6.55, 11.35, .45, 20),
+        _ppt_text("Risk scatter: Ridge-exp versus Lasso-3y; auxiliary Ridge-3y control is not plotted.", .98, 6.55, 11.35, .45, 20),
     ])
     notes.append("Compare peak-to-trough net wealth losses with the development return-risk scatter. The panels state their different date ranges. Ridge's full-history maximum decline is slightly deeper than the pool, so higher return is not lower risk. Explain annualized volatility and a zero risk-free-rate Sharpe convention if asked.")
 
-    pages.append(_ppt_plot_page(charts, "calendar_excess", "Monthly net excess", "Ridge · Sum of daily net differences within each month, in pp",
+    pages.append(_ppt_plot_page(charts, "calendar_excess", "Monthly net excess", "Ridge-exp · Sum of daily net differences within each month, in pp",
         f"{latest} ends on 29 April; later months remain unobserved."))
     notes.append("Read positive and negative monthly cells. Months sum daily net return differences, and future months are blank or dashed rather than zero. The latest year stops on 29 April. Discuss visible weak months as well as strong runs; the calendar is descriptive, not an independent repeated experiment.")
 
-    pages.append(_ppt_plot_page(charts, "annual_return", "Calendar-year net return", "Ridge and the matched pool · Compounded within each calendar year",
+    pages.append(_ppt_plot_page(charts, "annual_return", "Calendar-year net return", "Ridge-exp and the matched pool · Compounded within each calendar year",
         f"The {latest} bar covers observations only through {end}."))
     notes.append("Annual absolute returns compound within the calendar year, unlike excess sums. Keep negative years visible. Compare 2026 as a partial-year observation rather than a full twelve-month result. Annual portfolio values come from the continuous ledger rather than a new January portfolio reset.")
 
@@ -1775,7 +1792,7 @@ def write_presentation(ctx, charts, project, output_root):
     optimization_takeaway = 'Null fits remain diagnostics; rankable models follow the original Top-100 rule.'
     if optimization:
         optimization_takeaway = (
-            f'{optimization["development_candidates"]} dev tests · paired Ridge '
+            f'{optimization["development_candidates"]} dev tests · Ridge-3y control '
             f'{_ppt_percent(optimization["paired_ridge_development_net"])} · '
             f'original Lasso {_ppt_percent(optimization["baseline_development_net"])}.')
         if optimization.get('baseline_holdout_net') is not None:
@@ -1783,7 +1800,7 @@ def write_presentation(ctx, charts, project, output_root):
                 f'\n2026: selected {_ppt_percent(lasso_latest)} vs original Lasso '
                 f'{_ppt_percent(optimization["baseline_holdout_net"])}; no reselection.')
     pages.append([
-        *_ppt_header("Lasso: sparse model, matched experiment",
+        *_ppt_header("Lasso-3y: sparse model, matched experiment",
                      f'{lasso_settings["features"]} inputs · {lasso_settings["window"]} · '
                      f'{lasso_settings["target"]} · EMA{lasso_settings["span"]}'),
         _ppt_table(sparse_rows, .85, 1.85, [2.20, 2.55, 2.45, 4.40], .44, 18, [1, 2, 3]),
@@ -1799,7 +1816,7 @@ def write_presentation(ctx, charts, project, output_root):
         'Only rankable fits can enter the same Top-100 strategy. '
         + (f'Outer selection compares {optimization["lasso_candidates"]} Lasso configurations '
            f'and {optimization["ridge_controls"]} paired Ridge controls on 2021–2025 net '
-           'results, with paired inputs, window, target and EMA. Paired Ridge uses fixed '
+           'results, with paired inputs, window, target and EMA. Ridge-3y control uses fixed '
            'alpha10,000 and a float64 Gram solver; its penalty is not separately tuned. '
            'Original methods remain frozen; development gains do not prove L1 superiority. ' if optimization else '')
         + '2026 is evaluated only after the specification is frozen, and its already '
@@ -1808,8 +1825,8 @@ def write_presentation(ctx, charts, project, output_root):
 
     pages.append([
         *_ppt_header("Conclusion", "Historical evidence, with clear limits on persistence and implementation"),
-        _ppt_text(f"1   2021–2025: Ridge net {_ppt_percent(ridge_dev)}, pool {_ppt_percent(pool_dev)}.", 1.00, 2.03, 11.15, .80, 23, True),
-        _ppt_text(f"2   Lasso: 2021–2025 {_ppt_percent(lasso_dev)}; {latest} {_ppt_percent(lasso_latest)} net.", 1.00, 3.33, 11.15, 1.00, 23),
+        _ppt_text(f"1   Full net: Lasso-3y {_ppt_percent(_ppt_metric(ctx, 'lasso', 'full'))}; Ridge-exp {_ppt_percent(_ppt_metric(ctx, 'ridge', 'full'))}.", 1.00, 2.03, 11.15, .80, 23, True),
+        _ppt_text(f"2   Development: Lasso-3y {_ppt_percent(lasso_dev)}, Ridge-exp {_ppt_percent(ridge_dev)}; {latest}: {_ppt_percent(lasso_latest)} vs {_ppt_percent(ridge_latest)}.", 1.00, 3.33, 11.15, 1.00, 23),
         _ppt_text("3   Supplier revisions, event timing and trading assumptions limit the interpretation.", 1.00, 4.78, 11.15, .95, 23),
         _ppt_text("Questions", 1.00, 6.34, 11.15, .45, 22, True, _ppt_teal),
     ])
