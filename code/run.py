@@ -4,16 +4,16 @@ import argparse
 import json
 from pathlib import Path
 
-from backtest import run_backtests
+from backtest import add_lasso_backtests, run_backtests
 from data import load_data
-from models import train_models
+from models import train_lasso, train_models
 from report import build_report
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", choices=["all", "report"], default="all",
-                        help="Run the fixed strategy, or regenerate V2 from existing scores and ledgers")
+    parser.add_argument("--stage", choices=["all", "lasso", "report"], default="all",
+                        help="Train all models, add only Lasso to existing outputs, or rebuild documents")
     parser.add_argument("--data-dir", type=Path, required=True,
                         help="Directory containing the prepared market arrays")
     parser.add_argument("--features", type=Path, required=True,
@@ -36,6 +36,9 @@ def main():
     if args.stage == "all":
         result = train_models(data, config, output / "models")
         run_backtests(data, result, output, config)
+    elif args.stage == "lasso":
+        result = train_lasso(data, config, output / "models")
+        add_lasso_backtests(data, result, output, config)
     build_report(data, config, output, Path(__file__).resolve().parents[1])
     print(f"Finished: {output}", flush=True)
 

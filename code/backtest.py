@@ -358,10 +358,15 @@ def simulate_portfolio(data, scores, eligible, first_signal_index, config,
             sellable[ended | converted_old] = False
         refresh = d >= first_trade and (d - first_trade) % cadence == 0
         if refresh:
-            target_weights = _target_weights(
-                None if scores is None else scores[d - 1], eligible[d - 1],
-                top_n, method == "benchmark",
-            )
+            null_lasso = (method == 'lasso' and
+                          not np.isfinite(scores[d - 1, eligible[d - 1]]).any())
+            if null_lasso:
+                target_weights = np.zeros(n_stocks, dtype=np.float64)
+            else:
+                target_weights = _target_weights(
+                    None if scores is None else scores[d - 1], eligible[d - 1],
+                    top_n, method == "benchmark",
+                )
             missing_target_mark = (target_weights > 0) & (open_marks <= 0)
             if missing_target_mark.any():
                 codes = [data["codes"][j] for j in np.flatnonzero(missing_target_mark)]
@@ -502,14 +507,11 @@ def _performance(frame, benchmark, stage, fee):
     }
 
 
-METHODS = ["fundamental", "combined", "ridge", "lightgbm", "benchmark"]
-
-
 def _run_group(data, scores, eligible, first_signal, scopes, output, config):
     """Run fixed score panels against their matching-cost benchmark."""
     frames, action_log = [], []
     for scope in scopes:
-        for method in ["benchmark", *METHODS[:-1]]:
+        for method in ["benchmark", *scores]:
             frame = simulate_portfolio(
                 data, None if method == "benchmark" else scores[method],
                 eligible, first_signal, config, method=method, scope=scope,
@@ -544,6 +546,32 @@ def _run_group(data, scores, eligible, first_signal, scopes, output, config):
     pd.DataFrame(metrics).to_csv(output / "metrics.csv", index=False)
     pd.DataFrame(action_log).to_csv(output / "corporate_action_ledger.csv", index=False)
     return daily
+
+
+def add_lasso_backtests(data, result, output_dir, config):
+    """Append Lasso to existing ledgers, checking the replayed benchmark exactly."""
+    output = Path(output_dir)
+    experiment = output / 'lasso'
+    for folder, scores, scopes in [
+        ('results', result['scores'], ['daily', 'rebalance20', 'double_slippage']),
+        ('raw_baseline', result['raw_scores'], ['rebalance20']),
+    ]:
+        _run_group(data, scores, result['eligible'], result['first_signal'], scopes,
+                   experiment / folder, config)
+        for filename in ['daily_returns.csv', 'metrics.csv', 'corporate_action_ledger.csv']:
+            original = pd.read_csv(output / folder / filename, float_precision='round_trip')
+            additional = pd.read_csv(experiment / folder / filename, float_precision='round_trip')
+            if filename == 'daily_returns.csv':
+                left = original[original.method.eq('benchmark')].reset_index(drop=True)
+                right = additional[additional.method.eq('benchmark')].reset_index(drop=True)
+                pd.testing.assert_frame_equal(left, right, check_exact=True)
+            merged = pd.concat([original[~original.method.eq('lasso')],
+                                additional[additional.method.eq('lasso')]], ignore_index=True)
+            merged.to_csv(output / folder / filename, index=False)
+            restored = pd.read_csv(output / folder / filename, float_precision='round_trip')
+            pd.testing.assert_frame_equal(
+                original[~original.method.eq('lasso')].reset_index(drop=True),
+                restored[~restored.method.eq('lasso')].reset_index(drop=True), check_exact=True)
 
 
 def run_backtests(data, result, output_dir, config):

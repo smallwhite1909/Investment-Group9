@@ -16,7 +16,7 @@ import pandas as _analysis_pd
 from scipy.stats import rankdata as _analysis_rankdata
 
 
-_analysis_methods = ('fundamental', 'combined', 'ridge', 'lightgbm')
+_analysis_methods = ('fundamental', 'combined', 'ridge', 'lasso', 'lightgbm')
 _analysis_all_methods = (*_analysis_methods, 'benchmark')
 
 
@@ -120,6 +120,12 @@ def _analysis_label_diagnostics(data, scores, eligible):
     ic_annual = ic_daily.groupby(['year', 'method'], sort=True).agg(
         mean_ic=('rank_ic', 'mean'), days=('rank_ic', 'count'), mean_n=('n', 'mean'),
         last_signal=('date', 'max')).reset_index()
+    # A valid null Lasso fit emits no ranking. Retain that model-year explicitly
+    # rather than silently dropping it from annual comparisons.
+    model_years = pd.MultiIndex.from_product(
+        [np.unique(days // 10000), _analysis_methods], names=['year', 'method'])
+    ic_annual = ic_annual.set_index(['year', 'method']).reindex(model_years).reset_index()
+    ic_annual['days'] = ic_annual['days'].fillna(0).astype(int)
     ic_annual['last_signal'] = ic_annual.last_signal.dt.strftime('%Y-%m-%d')
     quintiles = []
     for (period, method, group), values in grouped.items():
@@ -218,7 +224,11 @@ def analyze_results(data, config, output_root):
         'Monthly turnover sums daily single-sided turnover; rolling excess sums daily strategy-minus-benchmark returns over 252 sessions. Rolling volatility uses sample standard deviation and sqrt(252). Preparation cash days remain in their actual calendar positions.',
         'Main and raw-baseline books share the original offset-zero 20-session execution grid and the same cost and trading restrictions. Daily/double-slippage diagnostics retain their recorded separate scopes.',
     ]
-    ctx = {'summary': summary, 'config': config, 'metrics': metrics, 'raw_metrics': raw_metrics,
+    lasso_fits = pd.read_csv(output / 'models/lasso_fit_windows.csv')
+    lasso_coefficients = pd.read_csv(output / 'models/lasso_coefficients.csv')
+    lasso_validation = pd.read_csv(output / 'models/lasso_validation.csv')
+    ctx = {'lasso_fits': lasso_fits, 'lasso_coefficients': lasso_coefficients,
+           'lasso_validation': lasso_validation, 'summary': summary, 'config': config, 'metrics': metrics, 'raw_metrics': raw_metrics,
            'daily_main': daily_main, 'raw_daily': raw_daily, 'returns': returns, 'raw_returns': raw_returns,
            'drawdown': drawdown, 'annual_returns': annual_returns, 'annual_excess': annual_excess,
            'monthly_net_excess': monthly_net_excess, 'monthly_net_return': monthly_net_return,
@@ -231,7 +241,9 @@ def analyze_results(data, config, output_root):
                 'monthly_net_excess': monthly_net_excess, 'monthly_net_return': monthly_net_return,
                 'calendar_excess': calendar_excess, 'calendar_return': calendar_return,
                 'rolling_excess': rolling_excess, 'rolling_vol': rolling_vol,
-                'monthly_turnover': monthly_turnover, 'cost_components': cost_components}
+                'monthly_turnover': monthly_turnover, 'cost_components': cost_components,
+                'lasso_fit_windows': lasso_fits, 'lasso_coefficients': lasso_coefficients,
+                'lasso_validation': lasso_validation}
     for fee in ('gross', 'net'):
         exported.update({f'annual_returns_{fee}': annual_returns[fee], f'annual_excess_{fee}': annual_excess[fee],
                          f'returns_{fee}': returns[fee], f'raw_returns_{fee}': raw_returns[fee]})
@@ -258,9 +270,9 @@ import matplotlib
 from backtest import simulate_portfolio
 
 
-_CHART_METHODS=['fundamental','combined','ridge','lightgbm','benchmark']
-_CHART_LABELS={'fundamental':'Fund.','combined':'Combined','ridge':'Ridge','lightgbm':'LGBM','benchmark':'EW pool'}
-_CHART_COLORS={'fundamental':'#9063B4','combined':'#D79538','ridge':'#137F82','lightgbm':'#3475AB','benchmark':'#8795A6'}
+_CHART_METHODS=['fundamental','combined','ridge','lasso','lightgbm','benchmark']
+_CHART_LABELS={'fundamental':'Fund.','combined':'Combined','ridge':'Ridge','lasso':'Lasso','lightgbm':'LGBM','benchmark':'EW pool'}
+_CHART_COLORS={'fundamental':'#9063B4','combined':'#D79538','ridge':'#137F82','lasso':'#C45262','lightgbm':'#3475AB','benchmark':'#8795A6'}
 _CHART_INK='#162B42'
 _CHART_MUTED='#657489'
 _CHART_GRID='#E3E9EF'
@@ -321,14 +333,14 @@ def _make_chart(ctx, key, path, width, height, size):
     FigureCanvasAgg(fig)
     report = size == 12
     left, right = (.90, .16) if report else (1.00, .22)
-    bottom, top = (.44, .47) if report else (.50, .52)
+    bottom, top = (.44, .72) if report else (.50, .75)
     ax = fig.add_axes([left / width, bottom / height,
                        (width-left-right) / width, (height-bottom-top) / height])
     legend_columns = None
     time_axis = False
     percent_axis = False
     multi_axes = False
-    plot_order = ['fundamental', 'combined', 'lightgbm', 'benchmark', 'ridge']
+    plot_order = ['fundamental', 'combined', 'lightgbm', 'benchmark', 'ridge', 'lasso']
     if key in ('gross_absolute', 'net_absolute', 'gross_excess', 'net_excess'):
         fee = key.split('_')[0]
         r = ctx['returns'][fee]
@@ -352,7 +364,7 @@ def _make_chart(ctx, key, path, width, height, size):
         ax.set_ylim(min(0, lo)-.05*(hi-lo), hi+.07*(hi-lo))
         ax.scatter(curves.index[-1], curves.ridge.iloc[-1], s=23 if report else 35,
                    color=_CHART_COLORS['ridge'], zorder=6, clip_on=False)
-        legend_columns = 5
+        legend_columns = 3
         time_axis = True
     elif key == 'drawdown':
         frame = ctx['drawdown']*100
@@ -368,7 +380,7 @@ def _make_chart(ctx, key, path, width, height, size):
     elif key == 'risk_return':
         ax.set_position([left/width, .78/height, (width-left-right)/width, (height-.78-top)/height])
         offsets = {'fundamental': (10, -18), 'combined': (-52, -19), 'ridge': (-20, 14),
-                   'lightgbm': (10, 5), 'benchmark': (-20, -19)}
+                   'lasso': (10, -19), 'lightgbm': (10, 5), 'benchmark': (-20, -19)}
         points = []
         for method in _CHART_METHODS:
             row = _chart_metric(ctx, 'rebalance20', 'development', method)
@@ -481,18 +493,18 @@ def _make_chart(ctx, key, path, width, height, size):
         table = ctx['ic_annual'].query('year >= 2021').pivot(index='year', columns='method', values='mean_ic')
         x = np.arange(len(table))
         for k, method in enumerate(_CHART_METHODS[:-1]):
-            ax.bar(x+(k-1.5)*.19, table[method], width=.165,
+            ax.bar(x+(k-2)*.16, table[method], width=.14,
                    label=_CHART_LABELS[method], color=_CHART_COLORS[method], zorder=3)
         ax.set_xticks(x, [str(y)+('*' if y == 2026 else '') for y in table.index])
         ax.set_ylabel('Mean daily Rank IC', fontsize=size, color=_CHART_MUTED, labelpad=8)
         ax.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter('%.2f'))
         ax.yaxis.set_major_locator(matplotlib.ticker.MultipleLocator(.02))
         ax.axhline(0, color='#ACB7C1', lw=.8)
-        legend_columns = 4
+        legend_columns = 3
     elif key in ('quintile', 'quintile_2026'):
         period = '2021–2025' if key == 'quintile' else '2026'
         table = ctx['quintiles'].query('period == @period')
-        for method in ['fundamental', 'combined', 'lightgbm', 'ridge']:
+        for method in ['fundamental', 'combined', 'lightgbm', 'ridge', 'lasso']:
             rows = table.query('method == @method').sort_values('group')
             ax.plot(rows.group, rows.mean_excess*100, marker='o', markersize=5 if report else 7,
                     color=_CHART_COLORS[method], label=_CHART_LABELS[method],
@@ -504,7 +516,7 @@ def _make_chart(ctx, key, path, width, height, size):
         ax.set_xticks(range(1,6), ['Q1', 'Q2', 'Q3', 'Q4', 'Q5'])
         ax.set_ylabel('Mean 20-day excess (pp)', fontsize=size, color=_CHART_MUTED, labelpad=8)
         ax.axhline(0, color='#9AA8B5', lw=.8)
-        legend_columns = 4
+        legend_columns = 3
     elif key == 'controls':
         fig.delaxes(ax)
         if report:
@@ -514,7 +526,7 @@ def _make_chart(ctx, key, path, width, height, size):
         else:
             ax1 = fig.add_axes([.70/width, .70/height, (width/2-1.10)/width, (height-1.35)/height])
             ax2 = fig.add_axes([(.50*width+.55)/width, .70/height, (width/2-.80)/width, (height-1.35)/height])
-        x = np.arange(4)
+        x = np.arange(len(_CHART_METHODS) - 1)
         for offset, raw, label, color in [(-.18, True, 'Raw', '#A4AFBB'), (.18, False, 'Adopted', _CHART_COLORS['ridge'])]:
             vals = [_chart_metric(ctx, 'rebalance20', 'development', m, raw=raw).total_return*100 for m in _CHART_METHODS[:-1]]
             ax1.bar(x+offset, vals, .32, label=label, color=color, zorder=3)
@@ -575,7 +587,7 @@ def _make_chart(ctx, key, path, width, height, size):
         if legend_columns:
             handles, labels = ax.get_legend_handles_labels()
             if key in ('gross_absolute', 'net_absolute', 'gross_excess', 'net_excess', 'rank_ic', 'quintile', 'quintile_2026'):
-                order = sorted(range(len(labels)), key=lambda i: ['Fund.', 'Combined', 'Ridge', 'LGBM', 'EW pool', 'EW pool (0)'].index(labels[i]))
+                order = sorted(range(len(labels)), key=lambda i: ['Fund.', 'Combined', 'Ridge', 'Lasso', 'LGBM', 'EW pool', 'EW pool (0)'].index(labels[i]))
                 handles, labels = [handles[i] for i in order], [labels[i] for i in order]
             fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(.53, .995),
                        ncol=legend_columns, frameon=False, fontsize=size,
@@ -652,10 +664,10 @@ _report_ink = '#162B42'
 _report_teal = '#137F82'
 _report_muted = '#657489'
 _report_grid = '#E3E9EF'
-_report_methods = ['fundamental', 'combined', 'ridge', 'lightgbm', 'benchmark']
+_report_methods = ['fundamental', 'combined', 'ridge', 'lasso', 'lightgbm', 'benchmark']
 _report_names = {
     'fundamental': 'Fundamental', 'combined': 'Combined', 'ridge': 'Ridge',
-    'lightgbm': 'LightGBM', 'benchmark': 'Benchmark',
+    'lasso': 'Lasso', 'lightgbm': 'LightGBM', 'benchmark': 'Benchmark',
 }
 
 
@@ -755,7 +767,7 @@ def write_report(ctx, charts, project, output_root):
     tree_params = specs['lightgbm']['model_params']
     model_settings = config['models']
 
-    # Page 1: main findings and the complete four-method recent comparison.
+    # Page 1: main findings and the complete five-method recent comparison.
     summary_rows = [['Portfolio', '2026 gross', '2026 net', 'Net excess (pp)']]
     for method in _report_methods:
         summary_rows.append([
@@ -776,7 +788,7 @@ def write_report(ctx, charts, project, output_root):
         _report_paragraph(
             'Can accounting and technical information improve stock selection after trading costs '
             'within the same opportunity set? We compare a fundamental score, a combined score, '
-            'Ridge regression and a shallow LightGBM model. A matched equal-weight portfolio '
+            'Ridge, Lasso and a shallow LightGBM model. A matched equal-weight portfolio '
             'isolates stock-selection performance from differences in the available stock pool.'),
         ('gap', 10),
         _report_paragraph('Main findings', 'subheading'),
@@ -799,10 +811,11 @@ def write_report(ctx, charts, project, output_root):
             f'excess is {_report_pp(recent["ridge"]["cumulative_excess"])} percentage points.'),
         ('gap', 8),
         _report_paragraph(
-            'The table retains every method: Combined leads this short interval, while Ridge '
-            'remains the main model. Absolute returns compound daily wealth; excess sums '
-            'daily strategy-minus-benchmark returns. The partial-year comparison is limited '
-            'evidence about persistence.'),
+            f'Lasso returns {_report_percent(development["lasso"]["total_return"], 2)} net in '
+            f'2021–2025 and {_report_percent(recent["lasso"]["total_return"], 2)} in 2026, '
+            'trailing Ridge in both intervals. Its 2021 null model requests cash, so it is '
+            'not fully invested in every year. Absolute returns compound; excess sums daily '
+            'strategy-minus-benchmark returns. Partial-year evidence remains limited.'),
     ]]
 
     # Page 2: concise definitions preserve the economic meaning of every candidate.
@@ -888,6 +901,8 @@ def write_report(ctx, charts, project, output_root):
             construction = 'Financial and technical family scores receive equal weight.'
         elif method == 'ridge':
             construction = f'L2-regularized regression; alpha={ridge_params["alpha"]:g}. [1]'
+        elif method == 'lasso':
+            construction = 'L1 regression; historical time-validation selects alpha. [5]'
         else:
             construction = (
                 f'Depth {tree_params["max_depth"]}; {tree_params["num_leaves"]} leaves; '
@@ -905,18 +920,17 @@ def write_report(ctx, charts, project, output_root):
             'demeaned across eligible labeled stocks.'), ('gap', 8),
         _report_table(model_rows, [88, width - 88]), ('gap', 10),
         _report_paragraph(
-            'Prediction ranks are residualized against industry intercepts and within-industry '
-            'log market capitalization, then reranked. A causal EMA uses alpha=2/(span+1), '
-            'followed by daily reranking. Missing inputs preserve prior state but emit no '
-            'score; state continues across years. Returns and NAV are never smoothed.'),
+            'Scores are residualized against industry and within-industry log size, reranked, '
+            'and causally smoothed with EMA alpha=2/(span+1), then reranked again. State '
+            'continues across years; missing inputs emit no score. Returns and NAV are not smoothed.'),
         ('gap', 8),
         _report_paragraph(
             f'Annual refits use expanding prior history sampled every '
             f'{model_settings["training_stride"]} market sessions. A training observation is '
             'admitted only when its t+21 exit is strictly earlier than the prediction start. '
             'The 2018–2020 portion is a fitted replay using the pre-2021 model; from 2021, '
-            'annual models use mature earlier labels. Model choices used daily 2021–2025 '
-            'comparisons; the portfolios here replay the adopted 20-session schedule.'),
+            'annual models use mature earlier labels. Lasso uses the same eight inputs as Ridge; '
+            'its regularization is selected inside each historical training window (Section 13).' ),
         ('gap', 8),
         _report_paragraph('Execution and costs', 'subheading'),
         _report_paragraph(
@@ -930,7 +944,7 @@ def write_report(ctx, charts, project, output_root):
             f'{config["slippage"] * 10000:g} bp per side. Sell stamp duty is '
             f'{config["stamp_before"] * 10000:g} bp before 28 Aug 2023 and '
             f'{config["stamp_after"] * 10000:g} bp thereafter. [3, 4] Round lots, '
-            'minimum commissions and liquidity impact are omitted.'), ('gap', 8),
+            'minimum commissions and liquidity impact are omitted.'), ('gap', 6),
         _report_paragraph(
             'The causal adjusted-price chain approximates reinvested corporate actions. '
             'Sourced exchanges and cash exits follow settlement assumptions; quote-less '
@@ -1093,7 +1107,8 @@ def write_report(ctx, charts, project, output_root):
         *_report_chart('rank_ic',
             'Figure 13. Annual mean daily Spearman rank IC of adopted scores against '
             'mature 20-session opening-return labels. The 2021–2025 values require '
-            'label exits by 31 Dec 2025; 2026 exits end on 29 Apr 2026.'),
+            'label exits by 31 Dec 2025; 2026 exits end on 29 Apr 2026. '
+            'Null-model years have no ranking and no IC bar.'),
         _report_paragraph(
             f'Ridge’s 2026 mean IC is '
             f'{ctx["ic_annual"].loc[ctx["ic_annual"]["year"].eq(2026) & ctx["ic_annual"]["method"].eq("ridge"), "mean_ic"].iloc[0]:+.4f}, '
@@ -1132,27 +1147,57 @@ def write_report(ctx, charts, project, output_root):
             'separation in 2026.'),
     ])
 
-    # Page 13: preserve all methods and the correct frequency of each control.
-    raw_ridge = _report_metric(ctx, 'ridge', 'development', raw=True)
+    # The added experiment replaces the secondary implementation-controls page.
+    lasso_fits = ctx['lasso_fits'].loc[ctx['lasso_fits'].prediction_start.ge(20210101)].sort_values('year')
+    lasso_rows = [['Year', 'Alpha', 'Nonzero / 8', 'Mean Rank IC']]
+    for _, fit in lasso_fits.iterrows():
+        year = int(fit['year'])
+        ic = ctx['ic_annual'].loc[ctx['ic_annual'].year.eq(year) & ctx['ic_annual'].method.eq('lasso'), 'mean_ic'].iloc[0]
+        lasso_rows.append([str(year), f'{fit["alpha"]:.3g}', str(int(fit['nonzero_count'])),
+                           f'{ic:+.4f}' if np.isfinite(ic) else '— (no scores)'])
+    comparison_rows = [['Interval', 'Lasso net', 'Ridge net', 'Lasso excess (pp)']]
+    for label, stage in [('2021–2025', 'development'), ('2026 partial', 'holdout')]:
+        result = _report_metric(ctx, 'lasso', stage)
+        comparison_rows.append([label, _report_percent(result.total_return, 2),
+                                _report_percent(_report_metric(ctx, 'ridge', stage).total_return, 2),
+                                _report_pp(result.cumulative_excess)])
+    nonzero_min, nonzero_max = int(lasso_fits.nonzero_count.min()), int(lasso_fits.nonzero_count.max())
+    alpha_count = len(specs['lasso']['model_params']['alpha_fractions'])
+    boundary_count = int(lasso_fits.grid_boundary.sum())
+    latest_coefficients = ctx['lasso_coefficients'].loc[ctx['lasso_coefficients'].year.eq(2026)]
+    kept = latest_coefficients.loc[latest_coefficients.coefficient.ne(0), 'feature'].tolist()
     pages.append([
-        _report_paragraph('13. Matched implementation controls', 'heading'), ('gap', 10),
-        *_report_chart('controls',
-            'Figure 16. Above: 2021–2025 net returns for raw and adopted scores, '
-            'with the same pool and 20-session schedule. Below: 2026 Ridge daily net '
-            'excess under daily targets, 20-session targets and daily doubled slippage.'),
+        _report_paragraph('13. Lasso: sparse coefficients and matched returns', 'heading'), ('gap', 10),
         _report_paragraph(
-            f'The raw 20-session Ridge baseline returns '
-            f'{_report_percent(raw_ridge["total_return"])} net in 2021–2025, versus '
-            f'{_report_percent(development["ridge"]["total_return"])} for the adopted '
-            'processed implementation. This comparison changes score processing while '
-            'holding the historical pool and cadence fixed.'), ('gap', 8),
+            'Lasso minimizes squared error plus an L1 coefficient penalty. Unlike Ridge, it '
+            'can set coefficients exactly to zero. Input ranks, annual history, industry/size '
+            'processing, EMA20, Top-100 execution and costs match Ridge; only the regression '
+            'and its historical regularization selection change. [5]'), ('gap', 8),
+        _report_table(comparison_rows, [100, 96, 96, width - 292]), ('gap', 10),
+        _report_paragraph('Historical parameter selection', 'subheading'),
         _report_paragraph(
-            'The doubled-slippage book is a daily implementation control, not a stress '
-            'test of the main 20-session schedule. Comparisons across frequencies change '
-            'both the timing of holdings and trading costs. These are existing '
-            'implementation comparisons, not evidence that a frequency rule was chosen '
-            'without reviewing historical results. The four-method 2026 gross/net '
-            'comparison is retained on the first page.'),
+            'For each forecast year, the preceding calendar year supplies internal validation. '
+            'Internal training labels must exit before validation begins; validation labels '
+            f'must exit before the forecast year. {alpha_count} alpha fractions of the training-only '
+            'all-zero threshold are compared using equal-date mean validation squared error. '
+            'The selected fraction is applied to the threshold recomputed on all mature '
+            'history for the final annual fit. There is no random date split or forecast-year '
+            'return selection.'), ('gap', 8),
+        _report_table(lasso_rows, [70, 110, 118, width - 298]), ('gap', 10),
+        _report_paragraph(
+            f'Annual final fits retain {nonzero_min}–{nonzero_max} of eight inputs. '
+            f'The 2026 nonzero inputs are {", ".join(kept) if kept else "none (null model; no ranking)"}. '
+            'A small coefficient is not evidence of economic irrelevance: correlated inputs '
+            'can substitute for one another. Validation prediction loss, whole-pool Rank IC '
+            'and fee-paying Top-100 returns measure different objectives. An all-zero fit '
+            'emits no score: the next target refresh requests cash, subject to execution '
+            'limits, rather than a security-order Top-100 basket.'), ('gap', 8),
+        _report_paragraph(
+            'Lasso does not improve on Ridge in either reported interval. The 2021 fit '
+            'selects the null model; the weak-penalty 2023 and 2025 fits approach unpenalized '
+            f'regression. {boundary_count} of six fits select a final-grid boundary. '
+            'The already reviewed 2026 history is not a new blind test. Full alpha, '
+            'coefficient, maturity and convergence records accompany the results.'),
     ])
 
     # Page 14: limits and a conclusion that does not overstate evidence or style neutrality.
@@ -1160,9 +1205,9 @@ def write_report(ctx, charts, project, output_root):
         _report_paragraph('14. Limitations and conclusions', 'heading'), ('gap', 10),
         _report_paragraph('What the results support', 'subheading'),
         _report_paragraph(
-            'Ridge combines regularized ranking, causal score smoothing and explicit '
-            'execution costs. Its stronger historical net return is accompanied by '
-            'meaningful drawdown and an inconsistent advantage across shorter intervals.'), ('gap', 8),
+            'Ridge and Lasso test different coefficient penalties under matched score processing '
+            'and execution. The comparison records both return and sparsity; neither penalty '
+            'guarantees stronger future returns or protection from drawdowns.'), ('gap', 8),
         _report_paragraph('What remains uncertain', 'subheading'),
         _report_paragraph(
             'Historical specification choices can favor patterns that do not persist. '
@@ -1213,6 +1258,11 @@ def write_report(ctx, charts, project, output_root):
             '<link href="https://m.mof.gov.cn/czxw/202308/t20230827_3904226.htm" '
             'color="#137F82">Official announcement</link>. Commission and slippage '
             'are research assumptions.'), ('gap', 12),
+        _report_paragraph(
+            '[5] Scikit-learn. <i>Lasso regression documentation.</i> L1 objective, '
+            'coefficient sparsity and convergence diagnostics. '
+            '<link href="https://scikit-learn.org/1.6/modules/generated/sklearn.linear_model.Lasso.html" '
+            'color="#137F82">Official API documentation</link>.'), ('gap', 10),
         _report_paragraph('Reproduction from prepared external inputs', 'subheading'),
         _report_paragraph(
             'config.json records fixed annual factor selections, directions, model settings '
@@ -1311,8 +1361,8 @@ _ppt_muted = "#68737E"
 _ppt_grid = "#D9DEE3"
 _ppt_width = 13.333333
 _ppt_height = 7.5
-_ppt_methods = ("fundamental", "combined", "ridge", "lightgbm", "benchmark")
-_ppt_labels = {"fundamental": "Fundamental", "combined": "Combined", "ridge": "Ridge", "lightgbm": "LightGBM", "benchmark": "Benchmark"}
+_ppt_methods = ("fundamental", "combined", "ridge", "lasso", "lightgbm", "benchmark")
+_ppt_labels = {"fundamental": "Fundamental", "combined": "Combined", "ridge": "Ridge", "lasso": "Lasso", "lightgbm": "LightGBM", "benchmark": "Benchmark"}
 _ppt_seconds = [20,70,50,55,75,65,50,60,40,65,75,55,45,40,50,60,55,55,65,30,0,0,0]
 
 def _ppt_register_fonts():
@@ -1548,7 +1598,7 @@ def write_presentation(ctx, charts, project, output_root):
         _ppt_text("Fundamentals, market signals and machine learning", .88, 3.74, 11.5, .55, 22),
         _ppt_text(f"{span}\nDaily inputs · Top 100 · 20-session targets", .88, 5.22, 11.5, .83, 20, color=_ppt_muted),
     ])
-    notes.append("Introduce the question: can financial and market signals improve cross-sectional stock selection after stated trading costs? Identify four fixed methods, the common opportunity set and the observed historical dates.")
+    notes.append("Introduce the question: can financial and market signals improve cross-sectional stock selection after stated trading costs? Identify five methods, the common opportunity set and the observed historical dates.")
 
     # 2. All methods remain visible, including weak 2026 results.
     rows = [["Method", "2021–2025 net", f"{latest} net", f"{latest} excess (pp)"]]
@@ -1556,16 +1606,16 @@ def write_presentation(ctx, charts, project, output_root):
         rows.append([_ppt_labels[method], _ppt_percent(_ppt_metric(ctx, method, "development")),
                      _ppt_percent(_ppt_metric(ctx, method, "holdout")),
                      f"{_ppt_metric(ctx, method, 'holdout', 'cumulative_excess') * 100:+.2f}"])
-    items = _ppt_header("Net performance at a glance", f"All four methods and the matched pool; {latest} ends on {end}")
+    items = _ppt_header("Net performance at a glance", f"All five methods and the matched pool; {latest} ends on {end}")
     for x, label, value in [(1.00, "RIDGE · 2021–2025 NET", _ppt_percent(ridge_dev)),
                             (5.00, f"RIDGE · {latest} NET", _ppt_percent(ridge_latest)),
                             (9.00, f"RIDGE · {latest} EXCESS", _ppt_pp(latest_excess))]:
         items += [_ppt_text(label, x, 1.94, 3.35, .3, 14, True, _ppt_muted),
                   _ppt_text(value, x, 2.38, 3.35, .55, 32, True, _ppt_teal)]
-    items += [_ppt_table(rows, .85, 3.32, [3.00, 3.20, 2.60, 2.80], .49, 18, [1, 2, 3], [3]),
-              _ppt_text("The latest-year excess is modest, with mixed results across methods.", .98, 6.55, 11.35, .45, 20)]
+    items += [_ppt_table(rows, .85, 3.20, [3.00, 3.20, 2.60, 2.80], .45, 18, [1, 2, 3], [3]),
+              _ppt_text("Lasso trails Ridge in both evaluation intervals; 2021 selects cash.", .98, 6.55, 11.35, .45, 20)]
     pages.append(items)
-    notes.append("Read the table before focusing on Ridge. The 2021–2025 net return is 195.66% versus 76.60% for the matched pool. In 2026 through 29 April, Ridge earns 8.80% net and +0.56 percentage points of summed daily excess. Combined has a higher partial-year return, while Fundamental and LightGBM lag the pool. Absolute returns compound; excess sums daily differences.")
+    notes.append(f"Read every method, including Lasso: its 2021–2025 net return is {_ppt_percent(_ppt_metric(ctx, 'lasso', 'development'))}, and its 2026 net return is {_ppt_percent(_ppt_metric(ctx, 'lasso', 'holdout'))}. Ridge remains the original reference implementation. Compare net returns and summed daily excess separately. Absolute returns compound; excess sums daily differences.")
 
     # 3. Two text columns instead of three decorative cards.
     pages.append([
@@ -1596,9 +1646,10 @@ def write_presentation(ctx, charts, project, output_root):
                   ["Fundamental", "Signed financial ranks", "20"],
                   ["Combined", "Equal financial / technical families", "40"],
                   ["Ridge", "alpha = 10,000", "20"],
+                  ["Lasso", "Historical time-validation alpha", "20"],
                   ["LightGBM", "depth 3; 7 leaves; 56 trees", "40"]]
     pages.append([*_ppt_header("Fixed models, annual refits", "Predict 20-session returns; only labels with earlier t+21 exits enter training"),
-                  *pipeline, _ppt_table(model_rows, .85, 3.12, [2.7, 6.0, 2.9], .55, 18, [2], [3]),
+                  *pipeline, _ppt_table(model_rows, .85, 3.12, [2.7, 6.0, 2.9], .50, 18, [2], [3]),
                   _ppt_text("Industry and log-size residualization precede the causal score EMA.", .98, 6.48, 11.35, .5, 20)])
     notes.append("Walk through input ranks, the annual fit, industry and within-industry log-capitalization residualization, and the causal EMA followed by ranks. State the Ridge alpha and shallow-tree settings. Training uses the absolute every-fifth-session grid and a strictly mature t+21 exit. The 2018–2020 history is fitted replay. From 2021, annual predictions use mature prior labels. Returns and NAV are not smoothed.")
 
@@ -1616,8 +1667,8 @@ def write_presentation(ctx, charts, project, output_root):
     notes.append("Differentiate daily signals and valuation from twenty-session targets. Gross and net books hold separate cash and securities. Explain T+1, opening limits, suspended orders and retries. The benchmark uses the same pool, frequency, rules and matching fees. Explain exchange and cash claims, cash released only after payment, documented settlement-date assumptions, and the zero-recovery end-date policy for unresolved positions. Synthetic adjusted units approximate dividend reinvestment.")
 
     pages.append(_ppt_plot_page(charts, "gross_absolute", "Gross absolute return", span,
-        "All four methods and the equal-weight pool are shown over the full history."))
-    notes.append("Read the complete gross return history. Include all four methods and the pool rather than only the winner. Wealth compounds daily portfolio returns. The initial flat section precedes feasible trading, and the early history is fitted replay. There is no yearly restart or clipped weak interval.")
+        "All five methods and the equal-weight pool are shown over the full history."))
+    notes.append("Read the complete gross return history. Include all five methods and the pool rather than only the winner. Wealth compounds daily portfolio returns. The initial flat section precedes feasible trading, and the early history is fitted replay. There is no yearly restart or clipped weak interval.")
 
     pages.append(_ppt_plot_page(charts, "net_absolute", "Net absolute return", span,
         f"2021–2025: Ridge {_ppt_percent(ridge_dev)}; matched pool {_ppt_percent(pool_dev)}."))
@@ -1670,14 +1721,25 @@ def write_presentation(ctx, charts, project, output_root):
         "The latest-year relationship is weak and non-monotone."))
     notes.append("Show the weaker latest-year diagnostic without hiding it. Only signals whose twenty-session exit is observed by 29 April enter the panel; the final mature signal is 30 March. Explain the limited fifty-five-date sample, overlapping labels and nearly complete observed-label coverage. In particular, the highest group need not beat the middle groups or the same-pool mean. This is signal diagnosis before trading costs.")
 
-    pages.append(_ppt_plot_page(charts, "controls", "Raw signals and implementation controls", "2021–2025 designs on the left; 2026 Ridge cadence / cost controls on the right",
-        "Daily doubled-slippage is a daily control; smoothing and cadence are separate."))
-    notes.append("The left panel compares raw-signal and adopted twenty-session net returns for all four methods in 2021–2025. The right panel compares 2026 Ridge daily, twenty-session and daily doubled-slippage summed net excess. Retain weaker comparisons. Do not call the daily doubled-slippage case a twenty-session stress, or treat a displayed latest-year best case as an independent strategy discovery.")
+    lasso_fits = ctx['lasso_fits'].loc[ctx['lasso_fits'].prediction_start.ge(20210101)].sort_values('year')
+    sparse_rows = [["Fit year", "Alpha", "Nonzero / 8", "Validation"]]
+    for _, fit in lasso_fits.iterrows():
+        sparse_rows.append([str(int(fit['year'])), f'{fit["alpha"]:.3g}',
+                            str(int(fit['nonzero_count'])), str(int(fit['year']) - 1)])
+    lasso_dev = _ppt_metric(ctx, 'lasso', 'development')
+    lasso_latest = _ppt_metric(ctx, 'lasso', 'holdout')
+    pages.append([
+        *_ppt_header("Lasso: sparse model, matched experiment", "Same eight inputs, EMA20 and execution as Ridge; L1 rather than L2 penalty"),
+        _ppt_table(sparse_rows, .85, 1.85, [2.20, 2.55, 2.45, 4.40], .44, 18, [1, 2, 3]),
+        _ppt_text(f"Net return: 2021–2025 { _ppt_percent(lasso_dev)}; {latest} {_ppt_percent(lasso_latest)}.", .98, 5.28, 11.35, .55, 22, True),
+        _ppt_text("2021 selects cash; weak penalties in 2023/2025 approach unpenalized regression.", .98, 6.13, 11.35, .65, 19),
+    ])
+    notes.append(f"Explain the L1 versus L2 comparison using the displayed annual sparse coefficient counts and matched returns. For each year, internal training labels exit before previous-calendar-year validation starts; validation labels exit before the forecast year. Compare {len(ctx['config']['method_specs']['lasso']['model_params']['alpha_fractions'])} alpha fractions with equal-date mean validation MSE, then refit on all mature history. The alpha scale is not Ridge's alpha scale. State whether sparsity actually occurs: Lasso may retain every input. An all-zero annual fit emits no score, so the next scheduled target requests cash subject to blocked-sale constraints; there is no arbitrary code-order Top-100 ranking. Prediction loss and fee-paying Top-100 returns are different objectives. The already reviewed 2026 history is not a new blind test.")
 
     pages.append([
         *_ppt_header("Conclusion", "Historical evidence, with clear limits on persistence and implementation"),
         _ppt_text(f"1   2021–2025: Ridge net {_ppt_percent(ridge_dev)}, pool {_ppt_percent(pool_dev)}.", 1.00, 2.03, 11.15, .80, 23, True),
-        _ppt_text(f"2   {latest}: Ridge excess {_ppt_pp(latest_excess)}; methods and score cohorts give mixed results.", 1.00, 3.33, 11.15, 1.00, 23),
+        _ppt_text(f"2   Lasso trails Ridge: 2021–2025 {_ppt_percent(lasso_dev)}; {latest} {_ppt_percent(lasso_latest)} net.", 1.00, 3.33, 11.15, 1.00, 23),
         _ppt_text("3   Supplier revisions, event timing and trading assumptions limit the interpretation.", 1.00, 4.78, 11.15, .95, 23),
         _ppt_text("Questions", 1.00, 6.34, 11.15, .45, 22, True, _ppt_teal),
     ])

@@ -188,6 +188,56 @@
       "rebalance_sessions": 20,
       "rebalance_offset_sessions": 0,
       "training_stride": 5
+    },
+    "lasso": {
+      "features": [
+        "F1",
+        "F2",
+        "F3",
+        "F5",
+        "T1",
+        "T2",
+        "T3",
+        "T5"
+      ],
+      "model_name": "lasso",
+      "model_params": {
+        "alpha_fractions": [
+          1e-06,
+          1e-05,
+          3e-05,
+          0.0001,
+          0.0003,
+          0.001,
+          0.003,
+          0.01,
+          0.03,
+          0.1,
+          0.3,
+          0.5,
+          0.7,
+          0.9,
+          1.0
+        ],
+        "max_iter": 20000,
+        "tol": 1e-09,
+        "blas_threads": 1,
+        "target_transform": "raw",
+        "training_window_years": null,
+        "validation": "previous_calendar_year_purged_mature_labels",
+        "selection_metric": "mean_daily_mse",
+        "null_signal_policy": "missing_scores_cash_target_at_next_scheduled_refresh"
+      },
+      "processing": {
+        "feature_rank_ema_span": 0,
+        "prediction_rank_ema_span": 20,
+        "neutralize": "industry_log_mcap",
+        "fundamental_weight": 0.0
+      },
+      "horizon_sessions": 20,
+      "rebalance_sessions": 20,
+      "rebalance_offset_sessions": 0,
+      "training_stride": 5
     }
   },
   "fold_selections": {
