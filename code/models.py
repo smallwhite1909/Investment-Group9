@@ -12,90 +12,124 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 from scipy.stats import rankdata
-from sklearn.linear_model import Lasso, Ridge
+from sklearn.linear_model import Ridge, enet_path
 from threadpoolctl import threadpool_limits
 
 
 METHODS = ('fundamental', 'combined', 'ridge', 'lightgbm')
 
 
-def _lasso_alpha_max(inputs, targets):
-    """Smallest L1 penalty giving zero slopes, with an unpenalized intercept."""
-    centered_y = targets - targets.mean()
-    return float(np.max(np.abs(inputs.T @ centered_y)) / len(targets))
+def _lasso_path(inputs, targets, settings):
+    """A centered float64 Gram path, shared with the development protocol."""
+    fractions = np.sort(np.asarray(settings['alpha_fractions'], dtype=np.float64))[::-1]
+    with threadpool_limits(limits=1, user_api='blas'):
+        x = np.asfortranarray(inputs, dtype=np.float64)
+        y = np.asarray(targets, dtype=np.float64)
+        xmean, ymean = x.mean(axis=0), float(y.mean())
+        x -= xmean
+        y = np.ascontiguousarray(y - ymean)
+        gram = np.ascontiguousarray(x.T @ x)
+        xy = np.ascontiguousarray(x.T @ y)
+        maximum = float(np.max(np.abs(xy)) / len(y))
+        if maximum <= 0:
+            raise ValueError('No feature-target covariance in Lasso training')
+        alphas, coefficients, gaps, iterations = enet_path(
+            x, y, l1_ratio=1., alphas=maximum * fractions, precompute=gram, Xy=xy,
+            check_input=False, copy_X=False, selection='cyclic',
+            max_iter=settings['max_iter'], tol=settings['tol'], return_n_iter=True)
+        coefficients[:, fractions == 1.] = 0.
+        if max(iterations) >= settings['max_iter']:
+            raise RuntimeError('Lasso path did not converge')
+        intercepts = ymean - xmean @ coefficients
+    return {'fractions': fractions, 'alpha_max': maximum, 'alphas': alphas,
+            'coefficients': coefficients, 'intercepts': intercepts,
+            'dual_gaps': gaps, 'n_iter': iterations}
 
 
 def _fit_lasso(inputs, targets, sampled, counts, days, cutoff, settings):
-    """Select a penalty using the previous calendar year, purging label overlap."""
+    """Purged previous-year alpha validation, with separately anchored windows."""
     row_days = np.repeat(sampled, counts)
     validation_start = (int(cutoff) // 10000 - 1) * 10000 + 101
     inner = days[row_days + 21] < validation_start
     validation = days[row_days] >= validation_start
-    if not inner.any() or not validation.any():
-        raise ValueError('Lasso needs nonempty purged training and previous-year validation')
-    train_x = np.asfortranarray(inputs[inner], dtype=np.float64)
-    train_y = np.asarray(targets[inner], dtype=np.float64)
-    valid_x = np.asarray(inputs[validation], dtype=np.float64)
+    full = np.ones(len(row_days), dtype=bool)
+    window = settings.get('training_window_years')
+    if window is not None:
+        inner &= days[row_days] >= (validation_start // 10000 - window) * 10000 + 101
+        full &= days[row_days] >= (int(cutoff) // 10000 - window) * 10000 + 101
+    if not inner.any() or not validation.any() or not full.any():
+        raise ValueError('Lasso requires nonempty purged train, validation and refit sets')
+    path = _lasso_path(inputs[inner], targets[inner], settings)
+    valid_x = np.asarray(inputs[validation])
     valid_y = np.asarray(targets[validation], dtype=np.float64)
     valid_dates, valid_counts = np.unique(row_days[validation], return_counts=True)
     offsets = np.r_[0, np.cumsum(valid_counts)[:-1]]
+    accum = np.zeros((len(path['fractions']), 3), dtype=np.float64)
+    for begin, count in zip(offsets, valid_counts):
+        x = np.asfortranarray(valid_x[begin:begin + count], dtype=np.float64)
+        y = valid_y[begin:begin + count]
+        with threadpool_limits(limits=1, user_api='blas'):
+            predictions = x @ path['coefficients'] + path['intercepts']
+        accum[:, 0] += np.mean(np.square(predictions - y[:, None]), axis=0)
+        ranks = rankdata(predictions, method='average', axis=0).astype(np.float64)
+        yrank = rankdata(y, method='average').astype(np.float64)
+        ranks -= ranks.mean(axis=0)
+        yrank -= yrank.mean()
+        norm = np.sqrt(np.sum(ranks * ranks, axis=0) * np.sum(yrank * yrank))
+        ic = np.zeros(len(path['fractions']))
+        np.divide(ranks.T @ yrank, norm, out=ic, where=norm > 0)
+        accum[:, 1] += ic
+        accum[:, 2] += np.ptp(predictions.astype(np.float32), axis=0) > 0
     candidates = []
-    with threadpool_limits(limits=1, user_api='blas'):
-        alpha_max = _lasso_alpha_max(train_x, train_y)
-        if alpha_max <= 0:
-            raise ValueError('Lasso training has no feature-target covariance')
-        for fraction in settings['alpha_fractions']:
-            model = Lasso(alpha=float(fraction) * alpha_max, fit_intercept=True,
-                          precompute=True, max_iter=settings['max_iter'],
-                          tol=settings['tol'], selection='cyclic').fit(train_x, train_y)
-            if fraction == 1.0:
-                # The exact alpha_max solution is the intercept-only model.
-                model.coef_[:] = 0.0
-            predictions = model.predict(valid_x)
-            rankable_days = sum(np.ptp(predictions[begin:begin + count].astype(np.float32)) > 0
-                                for begin, count in zip(offsets, valid_counts))
-            nonzero = int(np.count_nonzero(model.coef_))
-            errors = np.square(predictions - valid_y)
-            mse = float(np.mean(np.add.reduceat(errors, offsets) / valid_counts))
-            candidates.append({'alpha_fraction': float(fraction), 'alpha': model.alpha,
-                               'mean_daily_mse': mse,
-                               'nonzero_count': nonzero,
-                               'rankable_validation_days': int(rankable_days),
-                               'eligible_for_selection': nonzero > 0 and rankable_days == len(valid_dates),
-                               'dual_gap': float(model.dual_gap_), 'n_iter': int(model.n_iter_)})
-            if model.n_iter_ >= settings['max_iter']:
-                raise RuntimeError('Lasso validation fit did not converge')
-        rankable = [row for row in candidates if row['eligible_for_selection']]
-        if not rankable:
-            raise ValueError('No Lasso candidate can rank stocks for the Top100 portfolio')
-        selected = min(rankable, key=lambda row: (row['mean_daily_mse'], -row['alpha_fraction']))
-        for row in candidates:
-            row['selected'] = row is selected
-        full_x = np.asfortranarray(inputs, dtype=np.float64)
-        full_y = np.asarray(targets, dtype=np.float64)
-        full_max = _lasso_alpha_max(full_x, full_y)
-        model = Lasso(alpha=selected['alpha_fraction'] * full_max, fit_intercept=True,
-                      precompute=True, max_iter=settings['max_iter'], tol=settings['tol'],
-                      selection='cyclic').fit(full_x, full_y)
-        if selected['alpha_fraction'] == 1.0:
-            model.coef_[:] = 0.0
-    if model.n_iter_ >= settings['max_iter']:
-        raise RuntimeError('Lasso annual fit did not converge')
-    if not np.count_nonzero(model.coef_):
+    for k, fraction in enumerate(path['fractions']):
+        nonzero = int(np.count_nonzero(path['coefficients'][:, k]))
+        candidates.append({'alpha_fraction': float(fraction), 'alpha': float(path['alphas'][k]),
+                           'mean_daily_mse': float(accum[k, 0] / len(valid_dates)),
+                           'mean_daily_rank_ic': float(accum[k, 1] / len(valid_dates)),
+                           'nonzero_count': nonzero, 'validation_days': len(valid_dates),
+                           'rankable_validation_days': int(accum[k, 2]),
+                           'eligible_for_selection': nonzero > 0 and accum[k, 2] == len(valid_dates),
+                           'dual_gap': float(path['dual_gaps'][k]), 'n_iter': int(path['n_iter'][k])})
+    rankable = [k for k, row in enumerate(candidates) if row['eligible_for_selection']]
+    if not rankable:
+        raise ValueError('No Lasso candidate can rank stocks for the Top100 portfolio')
+    metric = settings.get('selection_metric', 'mean_daily_mse')
+    if metric in ('mean_rank_ic', 'mean_daily_rank_ic', 'rank_ic'):
+        key = lambda k: (-candidates[k]['mean_daily_rank_ic'], -candidates[k]['alpha_fraction'])
+    elif metric in ('mean_daily_mse', 'mse'):
+        key = lambda k: (candidates[k]['mean_daily_mse'], -candidates[k]['alpha_fraction'])
+    else:
+        raise ValueError(f'Unknown Lasso selection metric: {metric}')
+    chosen = min(rankable, key=key)
+    selected = candidates[chosen]
+    for k, row in enumerate(candidates):
+        row['selected'] = k == chosen
+    fitted = _lasso_path(inputs[full], targets[full], settings)
+    coefficient = fitted['coefficients'][:, chosen]
+    if not np.count_nonzero(coefficient):
         raise ValueError('Selected Lasso refit has no stock-ranking coefficients')
-    record = {'inner_train_latest_exit': int(days[row_days[inner].max() + 21]),
+    model = {'coefficient': coefficient, 'intercept': float(fitted['intercepts'][chosen]),
+             'alpha': float(fitted['alphas'][chosen])}
+    full_days = np.unique(row_days[full])
+    record = {'inner_train_first_signal': int(days[row_days[inner].min()]),
+              'inner_train_latest_exit': int(days[row_days[inner].max() + 21]),
+              'inner_train_rows': int(inner.sum()),
               'validation_start': int(days[valid_dates[0]]),
               'validation_latest_exit': int(days[valid_dates[-1] + 21]),
-              'validation_rows': int(validation.sum()), 'alpha_fraction': selected['alpha_fraction'],
-              'alpha': float(model.alpha), 'alpha_max': full_max,
-              'nonzero_count': int(np.count_nonzero(model.coef_)),
-              'null_signal': not bool(np.count_nonzero(model.coef_)),
-              'unconstrained_best_fraction': min(candidates, key=lambda row: row['mean_daily_mse'])['alpha_fraction'],
-              'rankable_validation_days': selected['rankable_validation_days'],
-              'dual_gap': float(model.dual_gap_), 'n_iter': int(model.n_iter_),
+              'validation_rows': int(validation.sum()), 'validation_days': len(valid_dates),
+              'alpha_fraction': selected['alpha_fraction'], 'alpha': model['alpha'],
+              'alpha_max': fitted['alpha_max'], 'nonzero_count': int(np.count_nonzero(coefficient)),
+              'null_signal': False, 'rankable_validation_days': selected['rankable_validation_days'],
+              'unconstrained_mse_best_fraction': min(candidates, key=lambda row: row['mean_daily_mse'])['alpha_fraction'],
+              'selection_metric': metric, 'training_window_years': window,
+              'target_transform': settings.get('target_transform', 'raw'),
+              'dual_gap': float(fitted['dual_gaps'][chosen]), 'n_iter': int(fitted['n_iter'][chosen]),
+              'train_rows': int(full.sum()), 'train_sampled_first': int(days[full_days[0]]),
+              'train_sampled_last': int(days[full_days[-1]]),
+              'train_latest_exit': int(days[full_days[-1] + 21]), 'train_sampled_days': len(full_days),
               'grid_boundary': selected['alpha_fraction'] in
-                  (min(row['alpha_fraction'] for row in rankable),
-                   max(row['alpha_fraction'] for row in rankable))}
+                  (min(candidates[k]['alpha_fraction'] for k in rankable),
+                   max(candidates[k]['alpha_fraction'] for k in rankable))}
     return model, record, candidates
 
 
@@ -119,7 +153,10 @@ def train_lasso(data, config, output_dir):
     for day in range(label_stop):
         finite = np.isfinite(labels[day])
         if finite.any():
-            labels[day, finite] -= np.mean(labels[day, finite], dtype=np.float64)
+            if config['method_specs']['lasso']['model_params'].get('target_transform', 'raw') == 'rank':
+                labels[day, finite] = centered_rank(labels[day, finite])
+            else:
+                labels[day, finite] -= np.mean(labels[day, finite], dtype=np.float64)
     folds = [(2021, first, int(np.searchsorted(days, 20210101)), 20210101, True)]
     for year in range(2021, last_year + 1):
         start = int(np.searchsorted(days, year * 10000 + 101))
@@ -129,6 +166,10 @@ def train_lasso(data, config, output_dir):
     rank_path = output / '_lasso_rank_inputs.npy'
     for year, start, stop, cutoff, replay in folds:
         selection = config['original_selections'][str(year)]
+        lasso_features = config['method_specs']['lasso']['features']
+        if set(lasso_features) != set(selection['features']):
+            selection = {'features': lasso_features,
+                         'indices': [config['feature_names'].index(name) for name in lasso_features]}
         ranked = _rank_panel(data, eligible, selection['indices'], stop, rank_path)
         mature = _mature_indices(days, cutoff)
         sampled = mature[mature % config['models']['training_stride'] == 0]
@@ -141,27 +182,27 @@ def train_lasso(data, config, output_dir):
             inputs, targets, sampled, valid.sum(axis=1), days, cutoff,
             config['method_specs']['lasso']['model_params'])
         phase = 'in_sample_fitted_diagnostic' if replay else 'past_mature_labels_annual_refit'
-        predictions = _predict(model, ranked, eligible, np.arange(start, stop))
-        for offset, day in enumerate(range(start, stop)):
-            if not np.ptp(predictions[offset, eligible[day]]) > 0:
+        for day in range(start, stop):
+            slots = np.flatnonzero(eligible[day])
+            x = np.asfortranarray(ranked[day, slots], dtype=np.float64)
+            with threadpool_limits(limits=1, user_api='blas'):
+                prediction = (x @ model['coefficient'] + model['intercept']).astype(np.float32)
+            if np.ptp(prediction) <= 0 or not np.isfinite(prediction).all():
                 raise ValueError(f'Lasso cannot rank eligible stocks on {days[day]}')
-        raw[start:stop] = predictions
+            raw[day, slots] = prediction
         record.update(year=year, phase=phase, prediction_start=int(days[start]),
-                      prediction_end=int(days[stop - 1]), train_rows=len(targets),
-                      train_latest_exit=int(days[sampled[-1] + 21]),
-                      train_sampled_first=int(days[sampled[0]]),
-                      train_sampled_last=int(days[sampled[-1]]),
-                      train_sampled_days=len(sampled),
-                      training_stride=config['models']['training_stride'])
+                      prediction_end=int(days[stop - 1]),
+                      training_stride=config['models']['training_stride'],
+                      feature_count=len(selection['features']))
         records.append(record)
         coefficients.extend({'year': year, 'phase': phase, 'feature': name,
                              'coefficient': float(value)}
-                            for name, value in zip(selection['features'], model.coef_))
+                            for name, value in zip(selection['features'], model['coefficient']))
         validation_records.extend(dict(row, year=year, phase=phase) for row in candidates)
         print(f'Lasso {int(days[start])}--{int(days[stop-1])}: '
-              f'alpha={model.alpha:.6g}, fraction={record["alpha_fraction"]:g}, '
-              f'nonzero={record["nonzero_count"]}/{len(model.coef_)}', flush=True)
-        del ranked, inputs, targets, model, predictions
+              f'alpha={model["alpha"]:.6g}, fraction={record["alpha_fraction"]:g}, '
+              f'nonzero={record["nonzero_count"]}/{len(model["coefficient"])}', flush=True)
+        del ranked, inputs, targets, model
         rank_path.unlink()
     raw.flush()
     processed = _processed_score(data, raw, eligible, config['method_specs']['lasso']['processing'])

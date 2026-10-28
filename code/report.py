@@ -722,6 +722,22 @@ def _report_render_table(rows, widths, styles):
     return table
 
 
+def _lasso_report_settings(config):
+    """Describe the frozen Lasso specification without research-file dependencies."""
+    spec = config['method_specs']['lasso']
+    params = spec['model_params']
+    window = params['training_window_years']
+    return {
+        'features': len(spec['features']),
+        'window': 'expanding history' if window is None else f'{window}-year rolling history',
+        'target': 'demeaned return target' if params['target_transform'] == 'raw' else 'cross-sectional rank target',
+        'selector': 'mean daily MSE' if params['selection_metric'] == 'mean_daily_mse' else 'mean daily Rank IC',
+        'selector_action': 'minimizes' if params['selection_metric'] == 'mean_daily_mse' else 'maximizes',
+        'span': int(spec['processing']['prediction_rank_ema_span']),
+        'alpha_count': len(params['alpha_fractions']),
+    }
+
+
 def write_report(ctx, charts, project, output_root):
     """Write fifteen independently laid-out A4 body pages and references.
 
@@ -760,9 +776,11 @@ def write_report(ctx, charts, project, output_root):
     ridge, benchmark = net['ridge'], net['benchmark']
     lasso_differences = [development['lasso'].total_return - development['ridge'].total_return,
                          recent['lasso'].total_return - recent['ridge'].total_return]
-    lasso_comparison = ('Lasso exceeds Ridge in both reported intervals.' if min(lasso_differences) > 0
-                        else 'Lasso trails Ridge in both reported intervals.' if max(lasso_differences) < 0
-                        else 'The Lasso–Ridge return comparison varies across intervals.')
+    lasso_comparison = ('Lasso exceeds original Ridge in both intervals.' if min(lasso_differences) > 0
+                        else 'Lasso trails original Ridge in both intervals.' if max(lasso_differences) < 0
+                        else 'Lasso improves on original Ridge in development, but trails it in 2026.'
+                        if lasso_differences[0] > 0 and lasso_differences[1] < 0
+                        else 'The Lasso–original Ridge comparison varies across intervals.')
     end_date = _report_date(summary['end_date'])
     first_trade = _report_date(summary['first_trade'])
     label_last = _report_date(summary['label_last_signal'])
@@ -770,6 +788,8 @@ def write_report(ctx, charts, project, output_root):
     ridge_params = specs['ridge']['model_params']
     tree_params = specs['lightgbm']['model_params']
     model_settings = config['models']
+    lasso_settings = _lasso_report_settings(config)
+    optimization = config.get('lasso_optimization')
 
     # Page 1: main findings and the complete five-method recent comparison.
     summary_rows = [['Portfolio', '2026 gross', '2026 net', 'Net excess (pp)']]
@@ -906,7 +926,7 @@ def write_report(ctx, charts, project, output_root):
         elif method == 'ridge':
             construction = f'L2-regularized regression; alpha={ridge_params["alpha"]:g}. [1]'
         elif method == 'lasso':
-            construction = 'L1 regression; historical time-validation selects alpha. [5]'
+            construction = f'L1 regression; {lasso_settings["features"]} inputs; annual validation alpha. [5]'
         else:
             construction = (
                 f'Depth {tree_params["max_depth"]}; {tree_params["num_leaves"]} leaves; '
@@ -921,7 +941,8 @@ def write_report(ctx, charts, project, output_root):
         _report_paragraph(
             'Each daily cross section is converted to centered average ranks. The prediction '
             f'target is the adjusted opening return from t+1 to t+{config["horizon"] + 1}, '
-            'demeaned across eligible labeled stocks.'), ('gap', 8),
+            'demeaned across eligible labeled stocks; a configured rank target transforms '
+            'this label cross-sectionally for Lasso.'), ('gap', 8),
         _report_table(model_rows, [88, width - 88]), ('gap', 10),
         _report_paragraph(
             'Scores are residualized against industry and within-industry log size, reranked, '
@@ -929,12 +950,12 @@ def write_report(ctx, charts, project, output_root):
             'continues across years; missing inputs emit no score. Returns and NAV are not smoothed.'),
         ('gap', 8),
         _report_paragraph(
-            f'Annual refits use expanding prior history sampled every '
+            f'Annual refits sample prior history every '
             f'{model_settings["training_stride"]} market sessions. A training observation is '
             'admitted only when its t+21 exit is strictly earlier than the prediction start. '
             'The 2018–2020 portion is a fitted replay using the pre-2021 model; from 2021, '
-            'annual models use mature earlier labels. Lasso uses the same eight inputs as Ridge; '
-            'its regularization is selected inside each historical training window (Section 13).' ),
+            'annual models use mature earlier labels. Original models use expanding history; '
+            'Lasso uses its configured input set, history window and target (Section 13).' ),
         ('gap', 8),
         _report_paragraph('Execution and costs', 'subheading'),
         _report_paragraph(
@@ -1150,9 +1171,9 @@ def write_report(ctx, charts, project, output_root):
             'separation in 2026.'),
     ])
 
-    # The added experiment replaces the secondary implementation-controls page.
+    # Frozen Lasso specification and development disclosure within the page budget.
     lasso_fits = ctx['lasso_fits'].loc[ctx['lasso_fits'].prediction_start.ge(20210101)].sort_values('year')
-    lasso_rows = [['Year', 'Alpha', 'Nonzero / 8', 'Mean Rank IC']]
+    lasso_rows = [['Year', 'Alpha', f'Nonzero / {lasso_settings["features"]}', 'Mean Rank IC']]
     for _, fit in lasso_fits.iterrows():
         year = int(fit['year'])
         ic = ctx['ic_annual'].loc[ctx['ic_annual'].year.eq(year) & ctx['ic_annual'].method.eq('lasso'), 'mean_ic'].iloc[0]
@@ -1164,41 +1185,53 @@ def write_report(ctx, charts, project, output_root):
         comparison_rows.append([label, _report_percent(result.total_return, 2),
                                 _report_percent(_report_metric(ctx, 'ridge', stage).total_return, 2),
                                 _report_pp(result.cumulative_excess)])
+    if optimization:
+        comparison_rows.append(['Dev., paired inputs', _report_percent(development['lasso'].total_return, 2),
+                                _report_percent(optimization['paired_ridge_development_net'], 2),
+                                _report_pp(development['lasso'].cumulative_excess)])
     nonzero_min, nonzero_max = int(lasso_fits.nonzero_count.min()), int(lasso_fits.nonzero_count.max())
-    alpha_count = len(specs['lasso']['model_params']['alpha_fractions'])
     boundary_count = int(lasso_fits.grid_boundary.sum())
     latest_coefficients = ctx['lasso_coefficients'].loc[ctx['lasso_coefficients'].year.eq(2026)]
     kept = latest_coefficients.loc[latest_coefficients.coefficient.ne(0), 'feature'].tolist()
+    optimization_text = ''
+    if optimization:
+        optimization_text = (
+            f'Outer search compared {optimization["development_candidates"]} configurations '
+            f'({optimization["lasso_candidates"]} Lasso; {optimization["ridge_controls"]} paired Ridge). '
+            f'Development data end {_report_date(str(optimization["selection_cutoff"]))}; '
+            'the selected specification was frozen before 2026 reevaluation. '
+            f'Original Lasso development net was {_report_percent(optimization["baseline_development_net"], 2)}. '
+            'Paired Ridge matches inputs, window, target and EMA, with fixed alpha=10,000 '
+            'and a float64 Gram solver; its penalty was not separately tuned. ')
+        if optimization.get('baseline_holdout_net') is not None:
+            optimization_text += (
+                f'Prior Lasso 2026 net was {_report_percent(optimization["baseline_holdout_net"], 2)}, '
+                f'versus {_report_percent(recent["lasso"].total_return, 2)} after optimization. ')
     pages.append([
-        _report_paragraph('13. Lasso: sparse coefficients and matched returns', 'heading'), ('gap', 10),
+        _report_paragraph('13. Lasso: sparse coefficients and matched returns', 'heading'), ('gap', 8),
         _report_paragraph(
-            'Lasso minimizes squared error plus an L1 coefficient penalty, which can set '
-            'coefficients exactly to zero. Its inputs, annual history, score processing, '
-            'EMA20, Top-100 execution and costs match Ridge. The strategy retains the same '
-            'stock-selection rule throughout the recorded history. [5]'), ('gap', 8),
-        _report_table(comparison_rows, [100, 96, 96, width - 292]), ('gap', 10),
-        _report_paragraph('Historical parameter selection', 'subheading'),
+            f'L1 regression uses {lasso_settings["features"]} inputs, {lasso_settings["window"]}, '
+            f'a {lasso_settings["target"]} and score EMA{lasso_settings["span"]}. '
+            'Top-100 timing, stock pool, execution and costs remain common. [5]'), ('gap', 8),
+        _report_table(comparison_rows, [100, 96, 96, width - 292]), ('gap', 8),
+        _report_paragraph('Historical selection and coefficient sparsity', 'subheading'),
         _report_paragraph(
-            'Each forecast year uses the preceding calendar year for internal validation. '
-            'Training labels exit before validation begins; validation labels exit before '
-            f'the forecast year. {alpha_count} fractions of the training-only all-zero alpha '
-            'threshold are evaluated. Null or constant-ranking fits remain diagnostics and '
-            'cannot supply Top-100 scores. Among rankable candidates, equal-date validation '
-            'MSE selects the fraction, then all mature history supplies the final refit and '
-            'its recomputed threshold. The final fit must produce a nonconstant ranking. '
-            'Forecast-year returns never select alpha.'), ('gap', 8),
-        _report_table(lasso_rows, [70, 110, 118, width - 298]), ('gap', 10),
+            'Inner alpha validation uses the preceding calendar year: training-label exits '
+            'precede validation, and validation-label exits precede the forecast. '
+            f'Among {lasso_settings["alpha_count"]} training-only alpha-threshold fractions, '
+            f'selection {lasso_settings["selector_action"]} {lasso_settings["selector"]} over rankable fits. '
+            'The selected fraction scales the threshold recomputed on the final mature '
+            'training window. Null and constant rankings remain diagnostics.'), ('gap', 8),
+        _report_table(lasso_rows, [70, 110, 118, width - 298]), ('gap', 8),
         _report_paragraph(
-            f'Annual final fits retain {nonzero_min}–{nonzero_max} of eight inputs. '
-            f'The 2026 nonzero inputs are {", ".join(kept)}. '
-            'A small coefficient is not evidence of economic irrelevance: correlated inputs '
-            'can substitute for one another. Validation prediction loss, whole-pool Rank IC '
-            'and fee-paying Top-100 returns measure different objectives.'), ('gap', 8),
+            f'Annual fits retain {nonzero_min}–{nonzero_max} of {lasso_settings["features"]} inputs; '
+            f'the 2026 nonzero inputs are {", ".join(kept)}. Correlated inputs can substitute '
+            'for one another; prediction quality and fee-paying Top-100 returns differ.'), ('gap', 8),
         _report_paragraph(
-            f'{lasso_comparison} Weak-penalty fits can approach unpenalized regression. '
-            f'{boundary_count} of six fits select a rankable-candidate grid boundary. '
-            'The already reviewed 2026 history is not a new blind test. Full alpha, '
-            'coefficient, maturity and convergence records accompany the results.'),
+            f'{optimization_text}{lasso_comparison} '
+            f'{boundary_count} of six fits select an eligible-grid edge. '
+            'Development gains do not establish L1 superiority. Already reviewed 2026 '
+            'history is not a new blind test; it does not trigger reselection.'),
     ])
 
     # Page 14: limits and a conclusion that does not overstate evidence or style neutrality.
@@ -1206,9 +1239,10 @@ def write_report(ctx, charts, project, output_root):
         _report_paragraph('14. Limitations and conclusions', 'heading'), ('gap', 10),
         _report_paragraph('What the results support', 'subheading'),
         _report_paragraph(
-            'Ridge and Lasso test different coefficient penalties under matched score processing '
-            'and execution. The comparison records both return and sparsity; neither penalty '
-            'guarantees stronger future returns or protection from drawdowns.'), ('gap', 8),
+            'Ridge and Lasso compare recorded specifications under matched execution. '
+            + ('The paired Ridge control additionally matches selected inputs, window, target '
+               'and processing. ' if optimization else '')
+            + 'Neither penalty guarantees stronger future returns or protection from drawdowns.'), ('gap', 8),
         _report_paragraph('What remains uncertain', 'subheading'),
         _report_paragraph(
             'Historical specification choices can favor patterns that do not persist. '
@@ -1580,6 +1614,8 @@ def write_presentation(ctx, charts, project, output_root):
     project = _ppt_Path(project)
     project.mkdir(parents=True, exist_ok=True)
     summary = ctx["summary"]
+    lasso_settings = _lasso_report_settings(ctx["config"])
+    optimization = ctx["config"].get("lasso_optimization")
     latest = int(summary["latest_year"])
     end = _ppt_human_date(summary["end"])
     span = f"{_ppt_human_date(summary['start'])} – {end}"
@@ -1591,9 +1627,11 @@ def write_presentation(ctx, charts, project, output_root):
     pool_dd = _ppt_metric(ctx, "benchmark", "full", "max_drawdown")
     lasso_differences = [_ppt_metric(ctx, 'lasso', stage) - _ppt_metric(ctx, 'ridge', stage)
                          for stage in ('development', 'holdout')]
-    lasso_comparison = ('Lasso exceeds Ridge in both evaluation intervals.' if min(lasso_differences) > 0
-                        else 'Lasso trails Ridge in both evaluation intervals.' if max(lasso_differences) < 0
-                        else 'Lasso–Ridge results vary across evaluation intervals.')
+    lasso_comparison = ('Lasso exceeds original Ridge in both intervals.' if min(lasso_differences) > 0
+                        else 'Lasso trails original Ridge in both intervals.' if max(lasso_differences) < 0
+                        else 'Lasso improves development return; 2026 trails original Ridge.'
+                        if lasso_differences[0] > 0 and lasso_differences[1] < 0
+                        else 'Lasso–original Ridge results vary across intervals.')
     pages, notes = [], []
 
     # 1. A cover, with no performance tiles or dense table.
@@ -1625,7 +1663,7 @@ def write_presentation(ctx, charts, project, output_root):
 
     # 3. Two text columns instead of three decorative cards.
     pages.append([
-        *_ppt_header("Why combine these signals?", "Fourteen candidate inputs; twelve inputs used across the fixed annual models"),
+        *_ppt_header("Why combine these signals?", f"Fourteen candidate inputs; {len(summary['selected_features'])} used across the frozen models"),
         _ppt_text("Fundamentals", 1.00, 1.96, 5.25, .4, 23, True),
         _ppt_text("Profitability and cash generation\n\nSigned book and earnings yields\n\nGrowth and leverage dynamics", 1.00, 2.68, 5.25, 2.45, 21),
         _ppt_text("F1 · F2 · F3 · F5 · F6 · F7 · F8 · F9 · F10", 1.00, 5.54, 5.25, .55, 14, color=_ppt_muted),
@@ -1652,7 +1690,7 @@ def write_presentation(ctx, charts, project, output_root):
                   ["Fundamental", "Signed financial ranks", "20"],
                   ["Combined", "Equal financial / technical families", "40"],
                   ["Ridge", "alpha = 10,000", "20"],
-                  ["Lasso", "Historical time-validation alpha", "20"],
+                  ["Lasso", f"L1; {lasso_settings['features']} inputs; annual validation alpha", str(lasso_settings['span'])],
                   ["LightGBM", "depth 3; 7 leaves; 56 trees", "40"]]
     pages.append([*_ppt_header("Fixed models, annual refits", "Predict 20-session returns; only labels with earlier t+21 exits enter training"),
                   *pipeline, _ppt_table(model_rows, .85, 3.12, [2.7, 6.0, 2.9], .50, 18, [2], [3]),
@@ -1728,19 +1766,45 @@ def write_presentation(ctx, charts, project, output_root):
     notes.append("Show the weaker latest-year diagnostic without hiding it. Only signals whose twenty-session exit is observed by 29 April enter the panel; the final mature signal is 30 March. Explain the limited fifty-five-date sample, overlapping labels and nearly complete observed-label coverage. In particular, the highest group need not beat the middle groups or the same-pool mean. This is signal diagnosis before trading costs.")
 
     lasso_fits = ctx['lasso_fits'].loc[ctx['lasso_fits'].prediction_start.ge(20210101)].sort_values('year')
-    sparse_rows = [["Fit year", "Alpha", "Nonzero / 8", "Validation"]]
+    sparse_rows = [["Fit year", "Alpha", f"Nonzero / {lasso_settings['features']}", "Validation"]]
     for _, fit in lasso_fits.iterrows():
         sparse_rows.append([str(int(fit['year'])), f'{fit["alpha"]:.3g}',
                             str(int(fit['nonzero_count'])), str(int(fit['year']) - 1)])
     lasso_dev = _ppt_metric(ctx, 'lasso', 'development')
     lasso_latest = _ppt_metric(ctx, 'lasso', 'holdout')
+    optimization_takeaway = 'Null fits remain diagnostics; rankable models follow the original Top-100 rule.'
+    if optimization:
+        optimization_takeaway = (
+            f'{optimization["development_candidates"]} dev tests · paired Ridge '
+            f'{_ppt_percent(optimization["paired_ridge_development_net"])} · '
+            f'original Lasso {_ppt_percent(optimization["baseline_development_net"])}.')
+        if optimization.get('baseline_holdout_net') is not None:
+            optimization_takeaway += (
+                f'\n2026: selected {_ppt_percent(lasso_latest)} vs original Lasso '
+                f'{_ppt_percent(optimization["baseline_holdout_net"])}; no reselection.')
     pages.append([
-        *_ppt_header("Lasso: sparse model, matched experiment", "Same eight inputs, EMA20 and execution as Ridge; L1 rather than L2 penalty"),
+        *_ppt_header("Lasso: sparse model, matched experiment",
+                     f'{lasso_settings["features"]} inputs · {lasso_settings["window"]} · '
+                     f'{lasso_settings["target"]} · EMA{lasso_settings["span"]}'),
         _ppt_table(sparse_rows, .85, 1.85, [2.20, 2.55, 2.45, 4.40], .44, 18, [1, 2, 3]),
         _ppt_text(f"Net return: 2021–2025 { _ppt_percent(lasso_dev)}; {latest} {_ppt_percent(lasso_latest)}.", .98, 5.28, 11.35, .55, 22, True),
-        _ppt_text("Null fits remain diagnostics; rankable models follow the original Top-100 rule.", .98, 6.13, 11.35, .65, 19),
+        _ppt_text(optimization_takeaway, .98, 6.13, 11.35, .65, 19),
     ])
-    notes.append(f"Explain the L1 versus L2 comparison using the displayed annual sparse coefficient counts and matched returns. For each year, internal training labels exit before previous-calendar-year validation starts; validation labels exit before the forecast year. Compare {len(ctx['config']['method_specs']['lasso']['model_params']['alpha_fractions'])} alpha fractions with equal-date mean validation MSE, then refit on all mature history. The alpha scale is not Ridge's alpha scale. State whether sparsity actually occurs: Lasso may retain every input. Null and constant-ranking candidates are retained only as validation diagnostics; only rankable candidates can be selected for the original Top-100 strategy, and the final refit must remain nonconstant. Prediction loss and fee-paying Top-100 returns are different objectives. The already reviewed 2026 history is not a new blind test.")
+    notes.append(
+        f'Explain the frozen Lasso: {lasso_settings["features"]} inputs, '
+        f'{lasso_settings["window"]}, {lasso_settings["target"]}, EMA{lasso_settings["span"]}. '
+        f'Inner alpha selection {lasso_settings["selector_action"]} {lasso_settings["selector"]} '
+        f'over {lasso_settings["alpha_count"]} fractions. Internal training exits precede '
+        'prior-calendar-year validation; validation exits precede each forecast year. '
+        'Only rankable fits can enter the same Top-100 strategy. '
+        + (f'Outer selection compares {optimization["lasso_candidates"]} Lasso configurations '
+           f'and {optimization["ridge_controls"]} paired Ridge controls on 2021–2025 net '
+           'results, with paired inputs, window, target and EMA. Paired Ridge uses fixed '
+           'alpha10,000 and a float64 Gram solver; its penalty is not separately tuned. '
+           'Original methods remain frozen; development gains do not prove L1 superiority. ' if optimization else '')
+        + '2026 is evaluated only after the specification is frozen, and its already '
+          'reviewed history is not a new blind test. Coefficient sparsity, prediction '
+          'quality and net portfolio returns are different measurements.')
 
     pages.append([
         *_ppt_header("Conclusion", "Historical evidence, with clear limits on persistence and implementation"),
@@ -1758,7 +1822,7 @@ def write_presentation(ctx, charts, project, output_root):
         _ppt_text(f"{len(summary['selected_features'])} used inputs\n\n2021–2025\n\nEvery fifth session\n\nHistorical common pool", 8.05, 2.20, 4.2, 3.00, 20),
         _ppt_text("Correlation describes signal overlap.", 8.05, 5.88, 4.2, .65, 20),
     ])
-    notes.append("Appendix for questions; no main-presentation time allocated. The matrix covers the union of twelve used annual model inputs, averaging same-date cross-sectional Spearman matrices over 243 sampled development dates. It is not a covariance matrix of strategy returns and not an independent test of alpha.")
+    notes.append("Appendix for questions; no main-presentation time allocated. The matrix covers the displayed union of used annual model inputs, averaging same-date cross-sectional Spearman matrices over the sampled development dates. It is not a covariance matrix of strategy returns and not an independent test of alpha.")
 
     positions = ctx["positions"]
     caps = positions[(positions["date"] == positions["date"].max()) & (positions["category"] == "cap")]

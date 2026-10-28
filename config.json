@@ -223,11 +223,12 @@
         "tol": 1e-09,
         "blas_threads": 1,
         "target_transform": "raw",
-        "training_window_years": null,
+        "training_window_years": 3,
         "validation": "previous_calendar_year_purged_mature_labels",
-        "selection_metric": "mean_daily_mse",
+        "selection_metric": "mean_daily_rank_ic",
         "selection_constraint": "nonzero_coefficients_and_nonconstant_validation_stock_ranking",
-        "zero_model_policy": "prediction_loss_diagnostic_only_not_an_investable_top100_candidate"
+        "zero_model_policy": "prediction_loss_diagnostic_only_not_an_investable_top100_candidate",
+        "solver": "centered_float64_Gram_enet_path"
       },
       "processing": {
         "feature_rank_ema_span": 0,
@@ -1274,5 +1275,53 @@
       "predict_start": 20260105,
       "predict_end": 20260429
     }
-  ]
+  ],
+  "lasso_optimization": {
+    "development_candidates": 144,
+    "lasso_candidates": 96,
+    "ridge_controls": 48,
+    "selected_id": "original8_w3_raw_rank_ic_ema20",
+    "selection_cutoff": 20251231,
+    "baseline_development_net": 1.2845144858444844,
+    "baseline_development_excess": 0.2614156992945594,
+    "selected_development_net": 2.114644154744289,
+    "selected_development_excess": 0.555118985148917,
+    "paired_ridge_development_net": 2.231194692750605,
+    "paired_ridge_development_excess": 0.6030256645615453,
+    "development_positive_years": 5,
+    "paired_ridge_control": "float64 Gram fixed alpha10000, same inputs/window/target/processing; original published Ridge stays frozen",
+    "selection_rule": "positive_gross_and_net_summed_daily_excess_then_max_net_daily_excess",
+    "selection_note": "2021-2025 development search;2026 already reviewed historical out-of-time re-evaluation after freeze",
+    "neighbour_ema_results": [
+      {
+        "ema_span": 0,
+        "net_return": 2.040983573954624,
+        "net_excess": 0.5449036044004515,
+        "max_drawdown": -0.2784899050228532,
+        "turnover": 10.45301299681996
+      },
+      {
+        "ema_span": 10,
+        "net_return": 2.087868036893211,
+        "net_excess": 0.5505296224664151,
+        "max_drawdown": -0.2744053504304391,
+        "turnover": 9.537798527728116
+      },
+      {
+        "ema_span": 20,
+        "net_return": 2.114644154744289,
+        "net_excess": 0.555118985148917,
+        "max_drawdown": -0.28515422606113705,
+        "turnover": 8.620532041416512
+      },
+      {
+        "ema_span": 40,
+        "net_return": 1.6811438154296297,
+        "net_excess": 0.39886420402307343,
+        "max_drawdown": -0.2834028504127889,
+        "turnover": 7.347757347235186
+      }
+    ],
+    "baseline_holdout_net": 0.07516475400961342
+  }
 }
