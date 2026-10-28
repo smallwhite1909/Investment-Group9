@@ -226,7 +226,8 @@
         "training_window_years": null,
         "validation": "previous_calendar_year_purged_mature_labels",
         "selection_metric": "mean_daily_mse",
-        "null_signal_policy": "missing_scores_cash_target_at_next_scheduled_refresh"
+        "selection_constraint": "nonzero_coefficients_and_nonconstant_validation_stock_ranking",
+        "zero_model_policy": "prediction_loss_diagnostic_only_not_an_investable_top100_candidate"
       },
       "processing": {
         "feature_rank_ema_span": 0,

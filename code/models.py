@@ -51,15 +51,26 @@ def _fit_lasso(inputs, targets, sampled, counts, days, cutoff, settings):
             if fraction == 1.0:
                 # The exact alpha_max solution is the intercept-only model.
                 model.coef_[:] = 0.0
-            errors = np.square(model.predict(valid_x) - valid_y)
+            predictions = model.predict(valid_x)
+            rankable_days = sum(np.ptp(predictions[begin:begin + count].astype(np.float32)) > 0
+                                for begin, count in zip(offsets, valid_counts))
+            nonzero = int(np.count_nonzero(model.coef_))
+            errors = np.square(predictions - valid_y)
             mse = float(np.mean(np.add.reduceat(errors, offsets) / valid_counts))
             candidates.append({'alpha_fraction': float(fraction), 'alpha': model.alpha,
                                'mean_daily_mse': mse,
-                               'nonzero_count': int(np.count_nonzero(model.coef_)),
+                               'nonzero_count': nonzero,
+                               'rankable_validation_days': int(rankable_days),
+                               'eligible_for_selection': nonzero > 0 and rankable_days == len(valid_dates),
                                'dual_gap': float(model.dual_gap_), 'n_iter': int(model.n_iter_)})
             if model.n_iter_ >= settings['max_iter']:
                 raise RuntimeError('Lasso validation fit did not converge')
-        selected = min(candidates, key=lambda row: (row['mean_daily_mse'], -row['alpha_fraction']))
+        rankable = [row for row in candidates if row['eligible_for_selection']]
+        if not rankable:
+            raise ValueError('No Lasso candidate can rank stocks for the Top100 portfolio')
+        selected = min(rankable, key=lambda row: (row['mean_daily_mse'], -row['alpha_fraction']))
+        for row in candidates:
+            row['selected'] = row is selected
         full_x = np.asfortranarray(inputs, dtype=np.float64)
         full_y = np.asarray(targets, dtype=np.float64)
         full_max = _lasso_alpha_max(full_x, full_y)
@@ -70,6 +81,8 @@ def _fit_lasso(inputs, targets, sampled, counts, days, cutoff, settings):
             model.coef_[:] = 0.0
     if model.n_iter_ >= settings['max_iter']:
         raise RuntimeError('Lasso annual fit did not converge')
+    if not np.count_nonzero(model.coef_):
+        raise ValueError('Selected Lasso refit has no stock-ranking coefficients')
     record = {'inner_train_latest_exit': int(days[row_days[inner].max() + 21]),
               'validation_start': int(days[valid_dates[0]]),
               'validation_latest_exit': int(days[valid_dates[-1] + 21]),
@@ -77,9 +90,12 @@ def _fit_lasso(inputs, targets, sampled, counts, days, cutoff, settings):
               'alpha': float(model.alpha), 'alpha_max': full_max,
               'nonzero_count': int(np.count_nonzero(model.coef_)),
               'null_signal': not bool(np.count_nonzero(model.coef_)),
+              'unconstrained_best_fraction': min(candidates, key=lambda row: row['mean_daily_mse'])['alpha_fraction'],
+              'rankable_validation_days': selected['rankable_validation_days'],
               'dual_gap': float(model.dual_gap_), 'n_iter': int(model.n_iter_),
               'grid_boundary': selected['alpha_fraction'] in
-                  (min(settings['alpha_fractions']), max(settings['alpha_fractions']))}
+                  (min(row['alpha_fraction'] for row in rankable),
+                   max(row['alpha_fraction'] for row in rankable))}
     return model, record, candidates
 
 
@@ -125,10 +141,11 @@ def train_lasso(data, config, output_dir):
             inputs, targets, sampled, valid.sum(axis=1), days, cutoff,
             config['method_specs']['lasso']['model_params'])
         phase = 'in_sample_fitted_diagnostic' if replay else 'past_mature_labels_annual_refit'
-        if record['nonzero_count']:
-            raw[start:stop] = _predict(model, ranked, eligible, np.arange(start, stop))
-        # An intercept-only fit offers no stock ranking. Leave its scores missing
-        # so the unchanged execution rule targets cash at scheduled refreshes.
+        predictions = _predict(model, ranked, eligible, np.arange(start, stop))
+        for offset, day in enumerate(range(start, stop)):
+            if not np.ptp(predictions[offset, eligible[day]]) > 0:
+                raise ValueError(f'Lasso cannot rank eligible stocks on {days[day]}')
+        raw[start:stop] = predictions
         record.update(year=year, phase=phase, prediction_start=int(days[start]),
                       prediction_end=int(days[stop - 1]), train_rows=len(targets),
                       train_latest_exit=int(days[sampled[-1] + 21]),
@@ -144,7 +161,7 @@ def train_lasso(data, config, output_dir):
         print(f'Lasso {int(days[start])}--{int(days[stop-1])}: '
               f'alpha={model.alpha:.6g}, fraction={record["alpha_fraction"]:g}, '
               f'nonzero={record["nonzero_count"]}/{len(model.coef_)}', flush=True)
-        del ranked, inputs, targets, model
+        del ranked, inputs, targets, model, predictions
         rank_path.unlink()
     raw.flush()
     processed = _processed_score(data, raw, eligible, config['method_specs']['lasso']['processing'])

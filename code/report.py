@@ -120,8 +120,7 @@ def _analysis_label_diagnostics(data, scores, eligible):
     ic_annual = ic_daily.groupby(['year', 'method'], sort=True).agg(
         mean_ic=('rank_ic', 'mean'), days=('rank_ic', 'count'), mean_n=('n', 'mean'),
         last_signal=('date', 'max')).reset_index()
-    # A valid null Lasso fit emits no ranking. Retain that model-year explicitly
-    # rather than silently dropping it from annual comparisons.
+    # Retain every model-year explicitly, including missing diagnostic observations.
     model_years = pd.MultiIndex.from_product(
         [np.unique(days // 10000), _analysis_methods], names=['year', 'method'])
     ic_annual = ic_annual.set_index(['year', 'method']).reindex(model_years).reset_index()
@@ -379,7 +378,7 @@ def _make_chart(ctx, key, path, width, height, size):
         legend_columns, time_axis, percent_axis = 2, True, True
     elif key == 'risk_return':
         ax.set_position([left/width, .78/height, (width-left-right)/width, (height-.78-top)/height])
-        offsets = {'fundamental': (10, -18), 'combined': (-52, -19), 'ridge': (-20, 14),
+        offsets = {'fundamental': (10, -18), 'combined': (-72, 12), 'ridge': (-20, 14),
                    'lasso': (10, -19), 'lightgbm': (10, 5), 'benchmark': (-20, -19)}
         points = []
         for method in _CHART_METHODS:
@@ -759,6 +758,11 @@ def write_report(ctx, charts, project, output_root):
     recent_gross = {method: _report_metric(ctx, method, 'holdout', 'gross') for method in _report_methods}
     development = {method: _report_metric(ctx, method, 'development') for method in _report_methods}
     ridge, benchmark = net['ridge'], net['benchmark']
+    lasso_differences = [development['lasso'].total_return - development['ridge'].total_return,
+                         recent['lasso'].total_return - recent['ridge'].total_return]
+    lasso_comparison = ('Lasso exceeds Ridge in both reported intervals.' if min(lasso_differences) > 0
+                        else 'Lasso trails Ridge in both reported intervals.' if max(lasso_differences) < 0
+                        else 'The Lasso–Ridge return comparison varies across intervals.')
     end_date = _report_date(summary['end_date'])
     first_trade = _report_date(summary['first_trade'])
     label_last = _report_date(summary['label_last_signal'])
@@ -812,10 +816,10 @@ def write_report(ctx, charts, project, output_root):
         ('gap', 8),
         _report_paragraph(
             f'Lasso returns {_report_percent(development["lasso"]["total_return"], 2)} net in '
-            f'2021–2025 and {_report_percent(recent["lasso"]["total_return"], 2)} in 2026, '
-            'trailing Ridge in both intervals. Its 2021 null model requests cash, so it is '
-            'not fully invested in every year. Absolute returns compound; excess sums daily '
-            'strategy-minus-benchmark returns. Partial-year evidence remains limited.'),
+            f'2021–2025 and {_report_percent(recent["lasso"]["total_return"], 2)} in 2026. '
+            f'{lasso_comparison} All five methods use the original Top-100 rule throughout. '
+            'Absolute returns compound; excess sums daily strategy-minus-benchmark returns. '
+            'Partial-year evidence remains limited.'),
     ]]
 
     # Page 2: concise definitions preserve the economic meaning of every candidate.
@@ -1107,8 +1111,7 @@ def write_report(ctx, charts, project, output_root):
         *_report_chart('rank_ic',
             'Figure 13. Annual mean daily Spearman rank IC of adopted scores against '
             'mature 20-session opening-return labels. The 2021–2025 values require '
-            'label exits by 31 Dec 2025; 2026 exits end on 29 Apr 2026. '
-            'Null-model years have no ranking and no IC bar.'),
+            'label exits by 31 Dec 2025; 2026 exits end on 29 Apr 2026.'),
         _report_paragraph(
             f'Ridge’s 2026 mean IC is '
             f'{ctx["ic_annual"].loc[ctx["ic_annual"]["year"].eq(2026) & ctx["ic_annual"]["method"].eq("ridge"), "mean_ic"].iloc[0]:+.4f}, '
@@ -1169,33 +1172,31 @@ def write_report(ctx, charts, project, output_root):
     pages.append([
         _report_paragraph('13. Lasso: sparse coefficients and matched returns', 'heading'), ('gap', 10),
         _report_paragraph(
-            'Lasso minimizes squared error plus an L1 coefficient penalty. Unlike Ridge, it '
-            'can set coefficients exactly to zero. Input ranks, annual history, industry/size '
-            'processing, EMA20, Top-100 execution and costs match Ridge; only the regression '
-            'and its historical regularization selection change. [5]'), ('gap', 8),
+            'Lasso minimizes squared error plus an L1 coefficient penalty, which can set '
+            'coefficients exactly to zero. Its inputs, annual history, score processing, '
+            'EMA20, Top-100 execution and costs match Ridge. The strategy retains the same '
+            'stock-selection rule throughout the recorded history. [5]'), ('gap', 8),
         _report_table(comparison_rows, [100, 96, 96, width - 292]), ('gap', 10),
         _report_paragraph('Historical parameter selection', 'subheading'),
         _report_paragraph(
-            'For each forecast year, the preceding calendar year supplies internal validation. '
-            'Internal training labels must exit before validation begins; validation labels '
-            f'must exit before the forecast year. {alpha_count} alpha fractions of the training-only '
-            'all-zero threshold are compared using equal-date mean validation squared error. '
-            'The selected fraction is applied to the threshold recomputed on all mature '
-            'history for the final annual fit. There is no random date split or forecast-year '
-            'return selection.'), ('gap', 8),
+            'Each forecast year uses the preceding calendar year for internal validation. '
+            'Training labels exit before validation begins; validation labels exit before '
+            f'the forecast year. {alpha_count} fractions of the training-only all-zero alpha '
+            'threshold are evaluated. Null or constant-ranking fits remain diagnostics and '
+            'cannot supply Top-100 scores. Among rankable candidates, equal-date validation '
+            'MSE selects the fraction, then all mature history supplies the final refit and '
+            'its recomputed threshold. The final fit must produce a nonconstant ranking. '
+            'Forecast-year returns never select alpha.'), ('gap', 8),
         _report_table(lasso_rows, [70, 110, 118, width - 298]), ('gap', 10),
         _report_paragraph(
             f'Annual final fits retain {nonzero_min}–{nonzero_max} of eight inputs. '
-            f'The 2026 nonzero inputs are {", ".join(kept) if kept else "none (null model; no ranking)"}. '
+            f'The 2026 nonzero inputs are {", ".join(kept)}. '
             'A small coefficient is not evidence of economic irrelevance: correlated inputs '
             'can substitute for one another. Validation prediction loss, whole-pool Rank IC '
-            'and fee-paying Top-100 returns measure different objectives. An all-zero fit '
-            'emits no score: the next target refresh requests cash, subject to execution '
-            'limits, rather than a security-order Top-100 basket.'), ('gap', 8),
+            'and fee-paying Top-100 returns measure different objectives.'), ('gap', 8),
         _report_paragraph(
-            'Lasso does not improve on Ridge in either reported interval. The 2021 fit '
-            'selects the null model; the weak-penalty 2023 and 2025 fits approach unpenalized '
-            f'regression. {boundary_count} of six fits select a final-grid boundary. '
+            f'{lasso_comparison} Weak-penalty fits can approach unpenalized regression. '
+            f'{boundary_count} of six fits select a rankable-candidate grid boundary. '
             'The already reviewed 2026 history is not a new blind test. Full alpha, '
             'coefficient, maturity and convergence records accompany the results.'),
     ])
@@ -1588,6 +1589,11 @@ def write_presentation(ctx, charts, project, output_root):
     latest_excess = _ppt_metric(ctx, "ridge", "holdout", "cumulative_excess")
     dd = _ppt_metric(ctx, "ridge", "full", "max_drawdown")
     pool_dd = _ppt_metric(ctx, "benchmark", "full", "max_drawdown")
+    lasso_differences = [_ppt_metric(ctx, 'lasso', stage) - _ppt_metric(ctx, 'ridge', stage)
+                         for stage in ('development', 'holdout')]
+    lasso_comparison = ('Lasso exceeds Ridge in both evaluation intervals.' if min(lasso_differences) > 0
+                        else 'Lasso trails Ridge in both evaluation intervals.' if max(lasso_differences) < 0
+                        else 'Lasso–Ridge results vary across evaluation intervals.')
     pages, notes = [], []
 
     # 1. A cover, with no performance tiles or dense table.
@@ -1613,7 +1619,7 @@ def write_presentation(ctx, charts, project, output_root):
         items += [_ppt_text(label, x, 1.94, 3.35, .3, 14, True, _ppt_muted),
                   _ppt_text(value, x, 2.38, 3.35, .55, 32, True, _ppt_teal)]
     items += [_ppt_table(rows, .85, 3.20, [3.00, 3.20, 2.60, 2.80], .45, 18, [1, 2, 3], [3]),
-              _ppt_text("Lasso trails Ridge in both evaluation intervals; 2021 selects cash.", .98, 6.55, 11.35, .45, 20)]
+              _ppt_text(lasso_comparison, .98, 6.55, 11.35, .45, 20)]
     pages.append(items)
     notes.append(f"Read every method, including Lasso: its 2021–2025 net return is {_ppt_percent(_ppt_metric(ctx, 'lasso', 'development'))}, and its 2026 net return is {_ppt_percent(_ppt_metric(ctx, 'lasso', 'holdout'))}. Ridge remains the original reference implementation. Compare net returns and summed daily excess separately. Absolute returns compound; excess sums daily differences.")
 
@@ -1732,14 +1738,14 @@ def write_presentation(ctx, charts, project, output_root):
         *_ppt_header("Lasso: sparse model, matched experiment", "Same eight inputs, EMA20 and execution as Ridge; L1 rather than L2 penalty"),
         _ppt_table(sparse_rows, .85, 1.85, [2.20, 2.55, 2.45, 4.40], .44, 18, [1, 2, 3]),
         _ppt_text(f"Net return: 2021–2025 { _ppt_percent(lasso_dev)}; {latest} {_ppt_percent(lasso_latest)}.", .98, 5.28, 11.35, .55, 22, True),
-        _ppt_text("2021 selects cash; weak penalties in 2023/2025 approach unpenalized regression.", .98, 6.13, 11.35, .65, 19),
+        _ppt_text("Null fits remain diagnostics; rankable models follow the original Top-100 rule.", .98, 6.13, 11.35, .65, 19),
     ])
-    notes.append(f"Explain the L1 versus L2 comparison using the displayed annual sparse coefficient counts and matched returns. For each year, internal training labels exit before previous-calendar-year validation starts; validation labels exit before the forecast year. Compare {len(ctx['config']['method_specs']['lasso']['model_params']['alpha_fractions'])} alpha fractions with equal-date mean validation MSE, then refit on all mature history. The alpha scale is not Ridge's alpha scale. State whether sparsity actually occurs: Lasso may retain every input. An all-zero annual fit emits no score, so the next scheduled target requests cash subject to blocked-sale constraints; there is no arbitrary code-order Top-100 ranking. Prediction loss and fee-paying Top-100 returns are different objectives. The already reviewed 2026 history is not a new blind test.")
+    notes.append(f"Explain the L1 versus L2 comparison using the displayed annual sparse coefficient counts and matched returns. For each year, internal training labels exit before previous-calendar-year validation starts; validation labels exit before the forecast year. Compare {len(ctx['config']['method_specs']['lasso']['model_params']['alpha_fractions'])} alpha fractions with equal-date mean validation MSE, then refit on all mature history. The alpha scale is not Ridge's alpha scale. State whether sparsity actually occurs: Lasso may retain every input. Null and constant-ranking candidates are retained only as validation diagnostics; only rankable candidates can be selected for the original Top-100 strategy, and the final refit must remain nonconstant. Prediction loss and fee-paying Top-100 returns are different objectives. The already reviewed 2026 history is not a new blind test.")
 
     pages.append([
         *_ppt_header("Conclusion", "Historical evidence, with clear limits on persistence and implementation"),
         _ppt_text(f"1   2021–2025: Ridge net {_ppt_percent(ridge_dev)}, pool {_ppt_percent(pool_dev)}.", 1.00, 2.03, 11.15, .80, 23, True),
-        _ppt_text(f"2   Lasso trails Ridge: 2021–2025 {_ppt_percent(lasso_dev)}; {latest} {_ppt_percent(lasso_latest)} net.", 1.00, 3.33, 11.15, 1.00, 23),
+        _ppt_text(f"2   Lasso: 2021–2025 {_ppt_percent(lasso_dev)}; {latest} {_ppt_percent(lasso_latest)} net.", 1.00, 3.33, 11.15, 1.00, 23),
         _ppt_text("3   Supplier revisions, event timing and trading assumptions limit the interpretation.", 1.00, 4.78, 11.15, .95, 23),
         _ppt_text("Questions", 1.00, 6.34, 11.15, .45, 22, True, _ppt_teal),
     ])

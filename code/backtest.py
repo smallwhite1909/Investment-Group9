@@ -358,15 +358,10 @@ def simulate_portfolio(data, scores, eligible, first_signal_index, config,
             sellable[ended | converted_old] = False
         refresh = d >= first_trade and (d - first_trade) % cadence == 0
         if refresh:
-            null_lasso = (method == 'lasso' and
-                          not np.isfinite(scores[d - 1, eligible[d - 1]]).any())
-            if null_lasso:
-                target_weights = np.zeros(n_stocks, dtype=np.float64)
-            else:
-                target_weights = _target_weights(
-                    None if scores is None else scores[d - 1], eligible[d - 1],
-                    top_n, method == "benchmark",
-                )
+            target_weights = _target_weights(
+                None if scores is None else scores[d - 1], eligible[d - 1],
+                top_n, method == "benchmark",
+            )
             missing_target_mark = (target_weights > 0) & (open_marks <= 0)
             if missing_target_mark.any():
                 codes = [data["codes"][j] for j in np.flatnonzero(missing_target_mark)]
